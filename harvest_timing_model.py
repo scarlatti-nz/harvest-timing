@@ -8,11 +8,12 @@ ETS regime, and rotation number. Carbon credits earned only in first rotation
 
 import numpy as np
 from quantecon.markov import tauchen, DiscreteDP
-import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, Dict, Optional
 import warnings
 import argparse
+import os
+import time
 
 
 # =============================================================================
@@ -27,32 +28,33 @@ class ModelParameters:
     discount_rate: float = 0.06
     
     # Age parameters
-    A_max: int = 100  # Maximum age in state space (no forced harvest)
+    A_max: int = 50  # Maximum age in state space (no forced harvest)
     carbon_credit_max_age: int = 16  # Carbon credits stop at this age
     
     # Price grid sizes
-    N_pc: int = 7   # Number of carbon price states
-    N_pt: int = 7   # Number of timber price states
+    N_pt: int = 10   # Number of timber price states
+    N_pc: int = 10   # Number of carbon price states
     
     # Price process parameters (AR(1) in logs)
     # Carbon price
-    pc_mean: float = 50.0      # Mean carbon price ($/tCO2)
-    pc_rho: float = 0.9        # AR(1) persistence
-    pc_sigma: float = 0.15     # Volatility of log price
+    pc_mean: float = 20.0      # Mean carbon price ($/tCO2)
+    pc_rho: float = 0.8        # AR(1) persistence
+    pc_sigma: float = 0.178     # Volatility of log price
     
     # Timber price
     pt_mean: float = 150.0     # Mean timber price ($/m³)
-    pt_rho: float = 0.85       # AR(1) persistence
-    pt_sigma: float = 0.20     # Volatility of log price
+    pt_rho: float = 0.63       # AR(1) persistence
+    pt_sigma: float = 0.15     # Volatility of log price
     
     # Cost parameters
-    harvest_cost_per_m3: float = 75.0   # $/m³
+    harvest_cost_per_m3: float = 46.0   # $/m³
+    harvest_cost_flat_per_ha: float = 12500.0  # Flat harvest cost per hectare
     replant_cost: float = 2000.0        # $ per hectare
     maintenance_cost: float = 50.0      # $ per year per hectare
     switch_cost: float = 500.0          # Admin cost to switch to permanent
     
     # Optional harvest penalty ($/m³) - set to 0 to disable
-    harvest_penalty_per_m3: float = 0.0
+    harvest_penalty_per_m3: float = 10.0
     
     # Permanent regime carbon liability parameters
     # On harvest: pay carbon_price * carbon_stock
@@ -132,6 +134,44 @@ def compute_volume_from_carbon(C_age: np.ndarray, params: ModelParameters) -> np
         V_age: Array of shape (N_a,) with volume at each age.
     """
     return params.timber_per_tonne_carbon * C_age
+
+
+def compute_price_quality_factor(params: ModelParameters) -> np.ndarray:
+    """
+    Compute price scaling factor based on age (wood quality).
+    
+    f(a) = 
+      0.5 + 0.03(a - 10)    10 <= a < 15
+      0.65 + 0.03(a - 15)   15 <= a < 20
+      0.8 + 0.04(a - 20)    20 <= a < 25
+      0.99                  25 <= a <= 35
+      0.99 - 0.01(a - 35)   35 < a <= 45
+      0.89 - 0.02(a - 45)   a > 45
+      
+    Assume 0 for a < 10 (unmarketable).
+    """
+    ages = np.arange(params.N_a)
+    factors = np.zeros_like(ages, dtype=float)
+    
+    for i, a in enumerate(ages):
+        if a < 10:
+            factors[i] = 0.0
+        elif 10 <= a < 15:
+            factors[i] = 0.5 + 0.03 * (a - 10)
+        elif 15 <= a < 20:
+            factors[i] = 0.65 + 0.03 * (a - 15)
+        elif 20 <= a < 25:
+            factors[i] = 0.8 + 0.04 * (a - 20)
+        elif 25 <= a <= 35:
+            factors[i] = 0.99
+        elif 35 < a <= 45:
+            factors[i] = 0.99 - 0.01 * (a - 35)
+        else: # a > 45
+            factors[i] = 0.89 - 0.02 * (a - 45)
+            
+    # Ensure non-negative
+    factors = np.maximum(factors, 0.0)
+    return factors
 
 
 def compute_carbon_flows_averaging(
@@ -280,94 +320,8 @@ def simulate_price_paths(
     return prices
 
 
-def plot_price_paths(
-    params: ModelParameters,
-    n_paths: int = 1000,
-    n_periods: int = 100,
-    save_path: Optional[str] = None
-):
-    """
-    Plot simulated price paths for carbon and timber prices.
-    
-    Shows the stochastic nature of the AR(1) price processes.
-    """
-    # Simulate paths
-    carbon_paths = simulate_price_paths(
-        params.pc_mean, params.pc_rho, params.pc_sigma,
-        n_paths=n_paths, n_periods=n_periods, seed=42
-    )
-    timber_paths = simulate_price_paths(
-        params.pt_mean, params.pt_rho, params.pt_sigma,
-        n_paths=n_paths, n_periods=n_periods, seed=123
-    )
-    
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    
-    years = np.arange(n_periods)
-    
-    # --- Carbon price paths ---
-    ax = axes[0]
-    
-    # Plot individual paths with transparency
-    for i in range(n_paths):
-        ax.plot(years, carbon_paths[i, :], color='#3498db', alpha=0.03, linewidth=0.5)
-    
-    # Plot percentiles
-    p5 = np.percentile(carbon_paths, 5, axis=0)
-    p25 = np.percentile(carbon_paths, 25, axis=0)
-    p50 = np.percentile(carbon_paths, 50, axis=0)
-    p75 = np.percentile(carbon_paths, 75, axis=0)
-    p95 = np.percentile(carbon_paths, 95, axis=0)
-    
-    ax.fill_between(years, p5, p95, alpha=0.2, color='#3498db', label='5th-95th percentile')
-    ax.fill_between(years, p25, p75, alpha=0.3, color='#3498db', label='25th-75th percentile')
-    ax.plot(years, p50, color='#2c3e50', linewidth=2, label='Median')
-    ax.axhline(params.pc_mean, color='#e74c3c', linestyle='--', linewidth=1.5, label=f'Mean = ${params.pc_mean:.0f}')
-    
-    ax.set_xlabel('Year', fontsize=11)
-    ax.set_ylabel('Carbon Price ($/tCO₂)', fontsize=11)
-    ax.set_title(f'Carbon Price Paths (n={n_paths})\nρ={params.pc_rho}, σ={params.pc_sigma}', 
-                 fontsize=12, fontweight='bold')
-    ax.legend(loc='upper right', fontsize=9)
-    ax.set_xlim(0, n_periods - 1)
-    ax.set_ylim(0, None)
-    ax.grid(True, alpha=0.3)
-    
-    # --- Timber price paths ---
-    ax = axes[1]
-    
-    # Plot individual paths with transparency
-    for i in range(n_paths):
-        ax.plot(years, timber_paths[i, :], color='#27ae60', alpha=0.03, linewidth=0.5)
-    
-    # Plot percentiles
-    p5 = np.percentile(timber_paths, 5, axis=0)
-    p25 = np.percentile(timber_paths, 25, axis=0)
-    p50 = np.percentile(timber_paths, 50, axis=0)
-    p75 = np.percentile(timber_paths, 75, axis=0)
-    p95 = np.percentile(timber_paths, 95, axis=0)
-    
-    ax.fill_between(years, p5, p95, alpha=0.2, color='#27ae60', label='5th-95th percentile')
-    ax.fill_between(years, p25, p75, alpha=0.3, color='#27ae60', label='25th-75th percentile')
-    ax.plot(years, p50, color='#2c3e50', linewidth=2, label='Median')
-    ax.axhline(params.pt_mean, color='#e74c3c', linestyle='--', linewidth=1.5, label=f'Mean = ${params.pt_mean:.0f}')
-    
-    ax.set_xlabel('Year', fontsize=11)
-    ax.set_ylabel('Timber Price ($/m³)', fontsize=11)
-    ax.set_title(f'Timber Price Paths (n={n_paths})\nρ={params.pt_rho}, σ={params.pt_sigma}', 
-                 fontsize=12, fontweight='bold')
-    ax.legend(loc='upper right', fontsize=9)
-    ax.set_xlim(0, n_periods - 1)
-    ax.set_ylim(0, None)
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"  Price paths plot saved to: {save_path}")
-    
-    plt.show()
+# Plotting functions have been moved to plot_results.py
+
 
 
 # =============================================================================
@@ -454,7 +408,8 @@ def build_reward_matrix(
     V_age: np.ndarray,
     C_age: np.ndarray,
     DeltaC_avg: np.ndarray,
-    DeltaC_perm: np.ndarray
+    DeltaC_perm: np.ndarray,
+    price_quality_factor: Optional[np.ndarray] = None
 ) -> np.ndarray:
     """
     Construct reward matrix R[state, action].
@@ -464,8 +419,11 @@ def build_reward_matrix(
     - Permanent: all rotations, all ages (indefinitely)
     
     Harvest costs:
-    - Averaging: harvest_cost + optional penalty
-    - Permanent: harvest_cost + optional penalty + carbon_liability (NPV)
+    - Averaging: harvest_cost_per_m3 only (no penalty, any rotation)
+    - Permanent: harvest_cost_per_m3 + harvest_penalty_per_m3 + carbon_liability (NPV)
+    
+    Note: When an averaging forest switches to permanent (Action 2), future
+    harvests will incur the penalty since they'll be in the permanent regime.
     
     Returns:
         R: Array of shape (N_states, N_actions)
@@ -477,6 +435,10 @@ def build_reward_matrix(
     
     # NPV factor for carbon liability
     liability_npv_factor = params.carbon_liability_npv_factor()
+    
+    # Default quality factor is 1.0 if not provided
+    if price_quality_factor is None:
+        price_quality_factor = np.ones(params.N_a)
     
     for s in range(state_space.N_states):
         a, i_pc, i_pt, regime, rotation = state_space.state_to_tuple[s]
@@ -507,19 +469,28 @@ def build_reward_matrix(
         
         # === Action 1: Harvest and replant ===
         # Timber revenue minus harvest cost
-        harvest_cost = params.harvest_cost_per_m3 + params.harvest_penalty_per_m3
-        R_timber = pt * volume - harvest_cost * volume
+        # Harvest penalty only applies to permanent regime (never to averaging)
+        if regime == 1:  # Permanent
+            harvest_cost_per_m3 = params.harvest_cost_per_m3 + params.harvest_penalty_per_m3
+        else:  # Averaging
+            harvest_cost_per_m3 = params.harvest_cost_per_m3
+        
+        # Apply price quality scaling factor
+        effective_pt = pt * price_quality_factor[a]
+        
+        R_timber = effective_pt * volume - harvest_cost_per_m3 * volume
         R_replant = -params.replant_cost
+        R_harvest_flat = -params.harvest_cost_flat_per_ha  # Flat harvest cost per hectare
         
         # Carbon liability for permanent regime
         if regime == 1:  # Permanent
             # Must pay carbon_price * carbon_stock on harvest
             # 50% instant, 50% over 10 years (use NPV)
             carbon_liability = pc * carbon_stock * liability_npv_factor
-            R[s, ACTION_HARVEST_REPLANT] = R_timber + R_replant - carbon_liability
+            R[s, ACTION_HARVEST_REPLANT] = R_timber + R_replant + R_harvest_flat - carbon_liability
         else:
             # Averaging: no carbon liability on harvest
-            R[s, ACTION_HARVEST_REPLANT] = R_timber + R_replant
+            R[s, ACTION_HARVEST_REPLANT] = R_timber + R_replant + R_harvest_flat
         
         # === Action 2: Switch to permanent ===
         if regime == 0:  # Only meaningful when in averaging
@@ -541,6 +512,56 @@ def build_reward_matrix(
             R[s, ACTION_SWITCH_PERMANENT] = R[s, ACTION_DO_NOTHING]
     
     return R
+
+
+def save_reward_matrix_csv(
+    R: np.ndarray,
+    state_space: StateSpace,
+    price_data: Dict,
+    filename: str = 'reward_matrix.csv'
+) -> None:
+    """
+    Save the reward matrix to a labeled CSV file for easier interpretation.
+    
+    Columns:
+        state_idx: State index (row in R matrix)
+        age: Forest age (years)
+        carbon_price: Carbon price ($/tCO2) 
+        timber_price: Timber price ($/m³)
+        regime: 'averaging' or 'permanent'
+        rotation: 'first' or 'later'
+        R_do_nothing: Reward for action 0 (continue growing)
+        R_harvest_replant: Reward for action 1 (harvest and replant)
+        R_switch_permanent: Reward for action 2 (switch to permanent regime)
+    
+    Args:
+        R: Reward matrix of shape (N_states, N_actions)
+        state_space: StateSpace object with state mappings
+        price_data: Dictionary with price grids
+        filename: Output filename
+    """
+    pc_grid = price_data['pc_grid']
+    pt_grid = price_data['pt_grid']
+    
+    regime_names = {0: 'averaging', 1: 'permanent'}
+    rotation_names = {1: 'first', 2: 'later'}
+    
+    with open(filename, 'w') as f:
+        # Header
+        f.write('state_idx,age,carbon_price,timber_price,regime,rotation,'
+                'R_do_nothing,R_harvest_replant,R_switch_permanent\n')
+        
+        # Data rows
+        for s in range(state_space.N_states):
+            age, i_pc, i_pt, regime, rotation = state_space.state_to_tuple[s]
+            
+            pc = pc_grid[i_pc]
+            pt = pt_grid[i_pt]
+            regime_str = regime_names[regime]
+            rotation_str = rotation_names[rotation]
+            
+            f.write(f'{s},{age},{pc:.2f},{pt:.2f},{regime_str},{rotation_str},'
+                    f'{R[s, 0]:.2f},{R[s, 1]:.2f},{R[s, 2]:.2f}\n')
 
 
 # =============================================================================
@@ -749,444 +770,164 @@ def analyze_policy(
     return results
 
 
-def plot_harvest_regions(
-    sigma: np.ndarray,
-    state_space: StateSpace,
+# Plotting functions have been moved to plot_results.py
+
+
+def simulate_single_trajectory(
     params: ModelParameters,
-    price_data: Dict,
-    max_age_plot: int = 50,
-    save_path: Optional[str] = None
-):
-    """
-    Plot harvest/switch decision regions in (age, price) space.
-    """
-    pc_grid = price_data['pc_grid']
-    pt_grid = price_data['pt_grid']
-    
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    
-    # Colors for actions
-    cmap = plt.cm.colors.ListedColormap(['#2ecc71', '#e74c3c', '#3498db'])
-    
-    # Plot for each regime/rotation combination
-    configs = [
-        (0, 1, 'Averaging Regime, First Rotation'),
-        (0, 2, 'Averaging Regime, Later Rotations'),
-        (1, 1, 'Permanent Regime, First Rotation'),
-        (1, 2, 'Permanent Regime, Later Rotations'),
-    ]
-    
-    plot_ages = min(max_age_plot + 1, params.N_a)
-    
-    for ax_idx, (regime, rotation, title) in enumerate(configs):
-        ax = axes.flatten()[ax_idx]
-        
-        # Use middle timber price, vary carbon price
-        mid_pt = params.N_pt // 2
-        
-        # Build decision matrix (age x carbon price)
-        decision_matrix = np.zeros((plot_ages, params.N_pc))
-        
-        for a in range(plot_ages):
-            for i_pc in range(params.N_pc):
-                state_tuple = (a, i_pc, mid_pt, regime, rotation)
-                s = state_space.tuple_to_state[state_tuple]
-                decision_matrix[a, i_pc] = sigma[s]
-        
-        # Plot
-        im = ax.imshow(
-            decision_matrix.T,
-            aspect='auto',
-            origin='lower',
-            cmap=cmap,
-            vmin=0,
-            vmax=2,
-            extent=[0, plot_ages - 1, pc_grid[0], pc_grid[-1]]
-        )
-        
-        ax.set_xlabel('Stand Age (years)', fontsize=11)
-        ax.set_ylabel('Carbon Price ($/tCO₂)', fontsize=11)
-        ax.set_title(title, fontsize=12, fontweight='bold')
-    
-    # Add colorbar
-    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
-    cbar = fig.colorbar(im, cax=cbar_ax, ticks=[0.33, 1, 1.67])
-    cbar.ax.set_yticklabels(['Hold', 'Harvest', 'Switch'])
-    
-    plt.suptitle('Optimal Decisions by State\n(at median timber price)', 
-                 fontsize=14, fontweight='bold', y=1.02)
-    plt.tight_layout(rect=[0, 0, 0.9, 1])
-    
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"\nPlot saved to: {save_path}")
-    
-    plt.show()
-
-
-def plot_harvest_regions_by_price(
-    sigma: np.ndarray,
     state_space: StateSpace,
-    params: ModelParameters,
     price_data: Dict,
-    save_path: Optional[str] = None
-):
-    """
-    Plot harvest/switch decision regions in (timber price, carbon price) space
-    for specific age/regime/rotation combinations.
-    
-    4 panels:
-    - First rotation averaging, age 16
-    - First rotation averaging, age 30
-    - Second rotation averaging, age 5
-    - Permanent, age 30
-    """
-    pc_grid = price_data['pc_grid']
-    pt_grid = price_data['pt_grid']
-    
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    
-    # Colors for actions
-    cmap = plt.cm.colors.ListedColormap(['#2ecc71', '#e74c3c', '#3498db'])
-    
-    # Panel configurations: (age, regime, rotation, title)
-    configs = [
-        (16, 0, 1, 'Averaging, 1st Rotation, Age 16'),
-        (30, 0, 1, 'Averaging, 1st Rotation, Age 30'),
-        (5, 0, 2, 'Averaging, 2nd+ Rotation, Age 5'),
-        (30, 1, 1, 'Permanent, Age 30'),
-    ]
-    
-    for ax_idx, (age, regime, rotation, title) in enumerate(configs):
-        ax = axes.flatten()[ax_idx]
-        
-        # Clamp age to valid range
-        a = min(age, params.N_a - 1)
-        
-        # Build decision matrix (timber price x carbon price)
-        decision_matrix = np.zeros((params.N_pt, params.N_pc))
-        
-        for i_pt in range(params.N_pt):
-            for i_pc in range(params.N_pc):
-                state_tuple = (a, i_pc, i_pt, regime, rotation)
-                s = state_space.tuple_to_state[state_tuple]
-                decision_matrix[i_pt, i_pc] = sigma[s]
-        
-        # Plot
-        im = ax.imshow(
-            decision_matrix.T,
-            aspect='auto',
-            origin='lower',
-            cmap=cmap,
-            vmin=0,
-            vmax=2,
-            extent=[pt_grid[0], pt_grid[-1], pc_grid[0], pc_grid[-1]]
-        )
-        
-        ax.set_xlabel('Timber Price ($/m³)', fontsize=11)
-        ax.set_ylabel('Carbon Price ($/tCO₂)', fontsize=11)
-        ax.set_title(title, fontsize=12, fontweight='bold')
-    
-    # Add colorbar
-    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
-    cbar = fig.colorbar(im, cax=cbar_ax, ticks=[0.33, 1, 1.67])
-    cbar.ax.set_yticklabels(['Hold', 'Harvest', 'Switch'])
-    
-    plt.suptitle('Optimal Decisions by Price State', 
-                 fontsize=14, fontweight='bold', y=1.02)
-    plt.tight_layout(rect=[0, 0, 0.9, 1])
-    
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"\nPlot saved to: {save_path}")
-    
-    plt.show()
-
-
-def plot_value_function(
+    R: np.ndarray,
+    Q: np.ndarray,
     V: np.ndarray,
-    state_space: StateSpace,
-    params: ModelParameters,
-    price_data: Dict,
-    max_age_plot: int = 50,
-    save_path: Optional[str] = None
-):
+    sigma: np.ndarray,
+    C_age: np.ndarray,
+    n_years: int = 50,
+    seed: Optional[int] = 42,
+    carbon_prices: Optional[np.ndarray] = None,
+    timber_prices: Optional[np.ndarray] = None
+) -> Dict:
     """
-    Plot value function by age for different price states.
+    Simulate a single trajectory of optimal policy execution with random prices.
+    
+    Tracks:
+    - Prices (Carbon, Timber)
+    - State (Age, Regime, Rotation)
+    - Action Values (Q-factors) for Hold, Harvest, Switch
+    - Optimal/Chosen Action
+    - Realized Net Revenue (Immediate Reward)
+    - Carbon Stock
+    
+    Returns:
+        Dictionary containing time-series data for plotting.
     """
+    if seed is not None:
+        np.random.seed(seed)
+        
+    # 1. Simulate continuous price paths if not provided
+    # Use a new seed for prices if not provided, to ensure variety if called multiple times
+    price_seed = seed if seed is not None else np.random.randint(0, 10000)
+    
+    if carbon_prices is None:
+        carbon_prices = simulate_price_paths(
+            params.pc_mean, params.pc_rho, params.pc_sigma,
+            n_paths=1, n_periods=n_years + 1, seed=price_seed
+        ).flatten()
+    
+    if timber_prices is None:
+        timber_prices = simulate_price_paths(
+            params.pt_mean, params.pt_rho, params.pt_sigma,
+            n_paths=1, n_periods=n_years + 1, seed=price_seed + 1
+        ).flatten()
+    
     pc_grid = price_data['pc_grid']
     pt_grid = price_data['pt_grid']
     
-    fig, ax = plt.subplots(figsize=(10, 6))
+    # 2. Initialize storage
+    data = {
+        'years': np.arange(n_years + 1),
+        'carbon_price': carbon_prices,
+        'timber_price': timber_prices,
+        'age': np.zeros(n_years + 1, dtype=int),
+        'regime': np.zeros(n_years + 1, dtype=int),
+        'rotation': np.zeros(n_years + 1, dtype=int),
+        'action': np.zeros(n_years + 1, dtype=int),
+        'q_hold': np.zeros(n_years + 1),
+        'q_harvest': np.zeros(n_years + 1),
+        'q_switch': np.zeros(n_years + 1),
+        'net_revenue': np.zeros(n_years + 1),
+        'carbon_stock': np.zeros(n_years + 1),
+    }
     
-    # Plot for regime=0, rotation=1, varying carbon price
-    mid_pt = params.N_pt // 2
-    colors = plt.cm.viridis(np.linspace(0, 1, params.N_pc))
+    # 3. Initial state: Averaging, 1st Rotation, Age 1 (or 0? Model starts at 0 usually)
+    # User said "stand age 1-50", let's start at age 1 to match "1st rotation averaging forest"
+    # But state space starts at 0. Let's start at age 1.
+    current_age = 1
+    current_regime = 0
+    current_rotation = 1
     
-    plot_ages = min(max_age_plot + 1, params.N_a)
+    # Pre-compute expected continuation values vector E[V(s')] = sum_s' P(s'|s,a) V(s')
+    # Since Q is (N_actions, N_states, N_states), we can do matrix-vector multiplication
+    # But Q is sparse-ish, so let's just do it per step to avoid memory blowup if Q is dense
+    # Actually, Q is passed in, so we can use it directly.
+    # EV[a, s] = sum_{s'} Q[a, s, s'] * V[s']
+    # We can compute this row by row for the current state.
     
-    for i_pc in range(params.N_pc):
-        values_by_age = []
-        for a in range(plot_ages):
-            state_tuple = (a, i_pc, mid_pt, 0, 1)
-            s = state_space.tuple_to_state[state_tuple]
-            values_by_age.append(V[s])
+    # Transpose Q back to (N_actions, N_states, N_states) if needed?
+    # build_transition_matrix returns (N_ACTIONS, N_states, N_states)
+    # So Q[action, s, :] is the distribution over next states
+    
+    for t in range(n_years + 1):
+        # Record state
+        data['age'][t] = current_age
+        data['regime'][t] = current_regime
+        data['rotation'][t] = current_rotation
+        data['carbon_stock'][t] = C_age[current_age]
         
-        ax.plot(range(plot_ages), values_by_age, 
-                color=colors[i_pc], 
-                label=f'P_c = ${pc_grid[i_pc]:.0f}',
-                linewidth=2)
-    
-    ax.set_xlabel('Stand Age (years)', fontsize=12)
-    ax.set_ylabel('Value ($)', fontsize=12)
-    ax.set_title('Value Function by Age\n(Averaging Regime, First Rotation, Median Timber Price)',
-                 fontsize=13, fontweight='bold')
-    ax.legend(title='Carbon Price', loc='upper left')
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"\nPlot saved to: {save_path}")
-    
-    plt.show()
+        # Find nearest price grid indices
+        i_pc = (np.abs(pc_grid - carbon_prices[t])).argmin()
+        i_pt = (np.abs(pt_grid - timber_prices[t])).argmin()
+        
+        # Identify current state index
+        state_tuple = (current_age, i_pc, i_pt, current_regime, current_rotation)
+        s = state_space.tuple_to_state[state_tuple]
+        
+        # Compute Q-values (Action Values) for this state
+        # Q(s, a) = R(s, a) + beta * sum(P(s'|s,a) * V(s'))
+        q_values = np.zeros(3)
+        for a in range(3):
+            # Immediate reward
+            r_sa = R[s, a]
+            
+            # Expected continuation value
+            # We can use Q matrix: expected_v = Q[a, s, :] @ V
+            # This might be slow if Q is huge and not sparse.
+            # However, given the structure, we know exactly which states are reachable.
+            # Let's use the Q matrix row if available, assuming it's efficient enough.
+            expected_v = np.dot(Q[a, s, :], V)
+            
+            q_values[a] = r_sa + params.beta * expected_v
+        
+        data['q_hold'][t] = q_values[ACTION_DO_NOTHING]
+        data['q_harvest'][t] = q_values[ACTION_HARVEST_REPLANT]
+        data['q_switch'][t] = q_values[ACTION_SWITCH_PERMANENT]
+        
+        # Get optimal action
+        # We could use argmax(q_values), but let's trust sigma[s]
+        # They should be identical (modulo float precision tie-breaking)
+        opt_action = sigma[s]
+        data['action'][t] = opt_action
+        
+        # Record Net Revenue (Immediate Reward of chosen action)
+        data['net_revenue'][t] = R[s, opt_action]
+        
+        # Update structural state for next period
+        if opt_action == ACTION_DO_NOTHING:
+            current_age = min(current_age + 1, params.A_max)
+            # regime, rotation unchanged
+        elif opt_action == ACTION_HARVEST_REPLANT:
+            current_age = 0 # Replant -> age 0
+            # regime unchanged
+            if current_rotation == 1:
+                current_rotation = 2
+            # else stay 2
+        elif opt_action == ACTION_SWITCH_PERMANENT:
+            current_age = min(current_age + 1, params.A_max)
+            if current_regime == 0:
+                current_regime = 1 # Become permanent
+            # rotation unchanged
+        
+    return data
+
+
+# plot_simulation_trajectory and plot_value_function have been moved to plot_results.py
 
 
 # =============================================================================
 # 10. Sanity Checks
 # =============================================================================
-
-def _print_scenario_details(
-    name: str,
-    params: ModelParameters,
-    price_data: Dict,
-    C_age: np.ndarray,
-    V_age: np.ndarray,
-    DeltaC: np.ndarray,
-    R: np.ndarray,
-    V: np.ndarray,
-    sigma: np.ndarray,
-    state_space: StateSpace,
-    regime: int = 0,
-    rotation: int = 1
-):
-    """Print detailed information for a sanity check scenario."""
-    pc = price_data['pc_grid'][0]
-    pt = price_data['pt_grid'][0]
-    
-    print(f"\n  Parameters:")
-    print(f"    Carbon price: ${pc:.2f}/tCO₂")
-    print(f"    Timber price: ${pt:.2f}/m³")
-    print(f"    Harvest cost: ${params.harvest_cost_per_m3:.2f}/m³")
-    print(f"    Harvest penalty: ${params.harvest_penalty_per_m3:.2f}/m³")
-    print(f"    Replant cost: ${params.replant_cost:.2f}")
-    print(f"    Maintenance: ${params.maintenance_cost:.2f}/yr")
-    print(f"    Discount rate: {params.discount_rate:.1%}")
-    print(f"    Carbon credits max age: {params.carbon_credit_max_age}")
-    
-    regime_name = "averaging" if regime == 0 else "permanent"
-    rot_name = "first" if rotation == 1 else "later"
-    
-    print(f"\n  State trajectory starting from (regime={regime_name}, rotation={rot_name}):")
-    print(f"    V(s) = Value function = expected PV of all future cashflows under optimal policy")
-    print(f"    Note: R values shown are for current state; after Switch, next state is in permanent regime")
-    print(f"    {'Age':>4} {'Carbon':>10} {'Volume':>10} {'ΔCarbon':>10} {'R(hold)':>10} {'R(harv)':>10} {'R(switch)':>10} {'V(s)':>12} {'Action':>8}")
-    print(f"    {'-'*4} {'-'*10} {'-'*10} {'-'*10} {'-'*10} {'-'*10} {'-'*10} {'-'*12} {'-'*8}")
-    
-    # Find optimal harvest age and first switch age
-    optimal_age = None
-    first_switch_age = None
-    for a in range(min(params.N_a, 50)):
-        s = state_space.tuple_to_state[(a, 0, 0, regime, rotation)]
-        action = sigma[s]
-        action_name = ['Hold', 'Harvest', 'Switch'][action]
-        
-        # Mark first switch or harvest
-        marker = ""
-        if action == ACTION_SWITCH_PERMANENT and first_switch_age is None and regime == 0:
-            first_switch_age = a
-            marker = " ← SWITCH"
-        elif action == ACTION_HARVEST_REPLANT and optimal_age is None:
-            optimal_age = a
-            marker = " ← HARVEST"
-        
-        print(f"    {a:4d} {C_age[a]:10.1f} {V_age[a]:10.1f} {DeltaC[a]:10.2f} "
-              f"{R[s, ACTION_DO_NOTHING]:10.2f} {R[s, ACTION_HARVEST_REPLANT]:10.2f} "
-              f"{R[s, ACTION_SWITCH_PERMANENT]:10.2f} {V[s]:12.2f} {action_name:>8}{marker}")
-    
-    # Summary
-    if first_switch_age is not None and regime == 0:
-        print(f"\n  → Optimal first action: SWITCH to permanent at age {first_switch_age}")
-        print(f"    After switching, you enter permanent regime where:")
-        print(f"    - Carbon credits continue indefinitely (not capped at age {params.carbon_credit_max_age})")
-        print(f"    - Harvesting incurs carbon liability = {params.carbon_liability_npv_factor():.1%} × carbon_price × carbon_stock")
-        
-        # Show what permanent regime looks like after switch
-        print(f"\n  What happens AFTER switching (permanent regime trajectory):")
-        print(f"    {'Age':>4} {'ΔC(perm)':>10} {'R(hold)':>12} {'R(harvest)':>12} {'Action':>8}")
-        print(f"    {'-'*4} {'-'*10} {'-'*12} {'-'*12} {'-'*8}")
-        
-        for a in range(first_switch_age + 1, min(first_switch_age + 15, params.N_a)):
-            s_perm = state_space.tuple_to_state[(a, 0, 0, 1, rotation)]  # regime=1 (permanent)
-            action_perm = sigma[s_perm]
-            action_name_perm = ['Hold', 'Harvest', 'Switch'][action_perm]
-            # Get permanent regime delta C
-            delta_c_perm = C_age[a] - C_age[a-1] if a > 0 else 0
-            print(f"    {a:4d} {delta_c_perm:10.2f} {R[s_perm, ACTION_DO_NOTHING]:12.2f} "
-                  f"{R[s_perm, ACTION_HARVEST_REPLANT]:12.2f} {action_name_perm:>8}")
-    
-    elif optimal_age is not None:
-        print(f"\n  → Optimal harvest age: {optimal_age} years")
-        
-        # Show harvest payoff breakdown at optimal age
-        a = optimal_age
-        volume = V_age[a]
-        carbon = C_age[a]
-        harvest_cost = (params.harvest_cost_per_m3 + params.harvest_penalty_per_m3) * volume
-        timber_revenue = pt * volume
-        net_timber = timber_revenue - harvest_cost - params.replant_cost
-        
-        print(f"\n  Harvest payoff breakdown at age {a}:")
-        print(f"    Timber revenue: ${timber_revenue:,.2f} ({volume:.1f} m³ × ${pt:.2f})")
-        print(f"    Harvest cost:   -${harvest_cost:,.2f} ({volume:.1f} m³ × ${params.harvest_cost_per_m3 + params.harvest_penalty_per_m3:.2f})")
-        print(f"    Replant cost:   -${params.replant_cost:,.2f}")
-        print(f"    Net timber:     ${net_timber:,.2f}")
-        
-        if regime == 1:  # Permanent
-            liability_factor = params.carbon_liability_npv_factor()
-            liability = pc * carbon * liability_factor
-            print(f"    Carbon liability: -${liability:,.2f} ({carbon:.1f} tCO₂ × ${pc:.2f} × {liability_factor:.3f})")
-            print(f"    Total harvest reward: ${net_timber - liability:,.2f}")
-        else:
-            print(f"    Total harvest reward: ${net_timber:,.2f}")
-    else:
-        print(f"\n  → No harvest optimal up to age 50")
-    
-    return optimal_age
-
-
-def run_sanity_checks(base_params: Optional[ModelParameters] = None):
-    """
-    Run sanity checks with detailed logging.
-    """
-    print("\n" + "=" * 70)
-    print("SANITY CHECKS")
-    print("=" * 70)
-    
-    # ==========================================================================
-    # Check 1: Baseline with deterministic prices
-    # ==========================================================================
-    print("\n" + "-" * 70)
-    print("CHECK 1: Baseline - Averaging regime, first rotation")
-    print("-" * 70)
-    
-    params_det = ModelParameters(N_pc=1, N_pt=1, A_max=60)
-    
-    C_age = compute_carbon_curve(params_det)
-    V_age = compute_volume_from_carbon(C_age, params_det)
-    DeltaC_avg = compute_carbon_flows_averaging(C_age, params_det)
-    DeltaC_perm = compute_carbon_flows_permanent(C_age)
-    price_data = build_price_grids(params_det)
-    state_space = build_state_space(params_det)
-    
-    print(f"\n  State space size: {state_space.N_states}")
-    
-    R = build_reward_matrix(params_det, state_space, price_data, V_age, C_age, DeltaC_avg, DeltaC_perm)
-    Q = build_transition_matrix(params_det, state_space, price_data)
-    V, sigma = solve_model(R, Q, params_det.beta)
-    
-    _print_scenario_details(
-        "Baseline", params_det, price_data, C_age, V_age, DeltaC_avg,
-        R, V, sigma, state_space, regime=0, rotation=1
-    )
-    
-    # Also show later rotation with switch penalty details
-    print("\n  --- Later Rotation (2nd+) with Switch Penalty ---")
-    print(f"    When switching from 2nd+ rotation averaging to permanent:")
-    print(f"    - If age < {params_det.carbon_credit_max_age}: must pay back shortfall = carbon_price × (C@16 - current_C)")
-    print(f"    - If age >= {params_det.carbon_credit_max_age}: no penalty, just start accruing")
-    print(f"    Carbon at age {params_det.carbon_credit_max_age}: {C_age[params_det.carbon_credit_max_age]:.1f} tCO₂")
-    print()
-    print(f"    {'Age':>4} {'Carbon':>10} {'Shortfall':>10} {'R(switch)':>12} {'Action':>8}")
-    print(f"    {'-'*4} {'-'*10} {'-'*10} {'-'*12} {'-'*8}")
-    
-    carbon_at_16 = C_age[params_det.carbon_credit_max_age]
-    opt_age_rot2 = None
-    for a in range(min(30, params_det.N_a)):
-        s = state_space.tuple_to_state[(a, 0, 0, 0, 2)]  # regime=0, rotation=2
-        action = sigma[s]
-        action_name = ['Hold', 'Harvest', 'Switch'][action]
-        # Shortfall = how much less carbon you have than age-16 level
-        shortfall = max(0, carbon_at_16 - C_age[a])
-        
-        if action == ACTION_HARVEST_REPLANT and opt_age_rot2 is None:
-            opt_age_rot2 = a
-        
-        print(f"    {a:4d} {C_age[a]:10.1f} {shortfall:10.1f} {R[s, ACTION_SWITCH_PERMANENT]:12.2f} {action_name:>8}")
-    
-    print(f"\n  → Optimal harvest age (averaging, later rotations): {opt_age_rot2} years")
-    
-    # ==========================================================================
-    # Check 2: No carbon credits
-    # ==========================================================================
-    print("\n" + "-" * 70)
-    print("CHECK 2: No carbon credits (baseline comparison)")
-    print("-" * 70)
-    
-    DeltaC_zero = np.zeros_like(DeltaC_avg)
-    R_no_carbon = build_reward_matrix(params_det, state_space, price_data, V_age, C_age, DeltaC_zero, DeltaC_zero)
-    V_nc, sigma_nc = solve_model(R_no_carbon, Q, params_det.beta)
-    
-    _print_scenario_details(
-        "No Carbon", params_det, price_data, C_age, V_age, DeltaC_zero,
-        R_no_carbon, V_nc, sigma_nc, state_space, regime=0, rotation=1
-    )
-    
-    # ==========================================================================
-    # Check 3: With harvest penalty
-    # ==========================================================================
-    print("\n" + "-" * 70)
-    print("CHECK 3: With $10/m³ harvest penalty")
-    print("-" * 70)
-    
-    params_penalty = ModelParameters(N_pc=1, N_pt=1, A_max=60, harvest_penalty_per_m3=10.0)
-    
-    C_age_p = compute_carbon_curve(params_penalty)
-    V_age_p = compute_volume_from_carbon(C_age_p, params_penalty)
-    DeltaC_avg_p = compute_carbon_flows_averaging(C_age_p, params_penalty)
-    DeltaC_perm_p = compute_carbon_flows_permanent(C_age_p)
-    price_data_p = build_price_grids(params_penalty)
-    state_space_p = build_state_space(params_penalty)
-    
-    R_p = build_reward_matrix(params_penalty, state_space_p, price_data_p, V_age_p, C_age_p, DeltaC_avg_p, DeltaC_perm_p)
-    Q_p = build_transition_matrix(params_penalty, state_space_p, price_data_p)
-    V_p, sigma_p = solve_model(R_p, Q_p, params_penalty.beta)
-    
-    _print_scenario_details(
-        "With Penalty", params_penalty, price_data_p, C_age_p, V_age_p, DeltaC_avg_p,
-        R_p, V_p, sigma_p, state_space_p, regime=0, rotation=1
-    )
-    
-    # ==========================================================================
-    # Check 4: Permanent regime (carbon credits continue, but liability on harvest)
-    # ==========================================================================
-    print("\n" + "-" * 70)
-    print("CHECK 4: Permanent regime (carbon indefinitely, liability on harvest)")
-    print("-" * 70)
-    
-    print(f"\n  Carbon liability NPV factor: {params_det.carbon_liability_npv_factor():.4f}")
-    print(f"    (50% instant + 50% over {params_det.carbon_liability_years} years)")
-    print(f"  Carbon credits: continue indefinitely (unlike averaging which stops at age {params_det.carbon_credit_max_age})")
-    
-    _print_scenario_details(
-        "Permanent", params_det, price_data, C_age, V_age, DeltaC_perm,
-        R, V, sigma, state_space, regime=1, rotation=1
-    )
-    
-    print("\n" + "=" * 70)
-    print("✓ SANITY CHECKS COMPLETED")
-    print("=" * 70)
+# Sanity checks have been moved to sanity_checks.py
+# Import run_sanity_checks from that module if needed
 
 
 # =============================================================================
@@ -1203,6 +944,8 @@ Examples:
   python harvest_timing_model.py                    # Run full model
   python harvest_timing_model.py --sanity-checks    # Run only sanity checks
   python harvest_timing_model.py --no-plots         # Run without generating plots
+  python harvest_timing_model.py --price-paths-only # Generate price paths and exit
+  python harvest_timing_model.py --grid-size 20     # Use 20 price states for each price
         """
     )
     parser.add_argument(
@@ -1221,6 +964,23 @@ Examples:
         default=0.0,
         help='Additional harvest penalty in $/m³ (default: 0)'
     )
+    parser.add_argument(
+        '--price-paths-only',
+        action='store_true',
+        help='Generate price paths plot and exit'
+    )
+    parser.add_argument(
+        '--grid-size',
+        type=int,
+        default=7,
+        help='Number of price states for both timber and carbon prices (default: 7)'
+    )
+    parser.add_argument(
+        '--temp-dir',
+        type=str,
+        default='temp',
+        help='Directory to save model results pickle file (default: temp)'
+    )
     return parser.parse_args()
 
 
@@ -1232,6 +992,7 @@ def main():
     
     # If only sanity checks requested, run them and exit
     if args.sanity_checks:
+        from sanity_checks import run_sanity_checks
         print("=" * 70)
         print("REAL OPTIONS MODEL - SANITY CHECKS ONLY")
         print("=" * 70)
@@ -1243,7 +1004,11 @@ def main():
     print("=" * 70)
     
     # Initialize parameters
-    params = ModelParameters(harvest_penalty_per_m3=args.harvest_penalty)
+    params = ModelParameters(
+        harvest_penalty_per_m3=args.harvest_penalty,
+        N_pt=args.grid_size,
+        N_pc=args.grid_size
+    )
     
     print("\n--- Model Parameters ---")
     print(f"  Discount rate: {params.discount_rate:.1%}")
@@ -1260,11 +1025,15 @@ def main():
     V_age = compute_volume_from_carbon(C_age, params)
     DeltaC_avg = compute_carbon_flows_averaging(C_age, params)
     DeltaC_perm = compute_carbon_flows_permanent(C_age)
+    price_quality_factor = compute_price_quality_factor(params)
     
     print(f"  Carbon at age 16: {C_age[16]:.1f} tCO₂/ha")
     print(f"  Carbon at age 30: {C_age[30]:.1f} tCO₂/ha")
     print(f"  Volume at age 16: {V_age[16]:.1f} m³/ha (= {params.timber_per_tonne_carbon} × carbon)")
     print(f"  Volume at age 30: {V_age[30]:.1f} m³/ha")
+    print(f"  Price quality factor at age 10: {price_quality_factor[10]:.2f}")
+    print(f"  Price quality factor at age 25: {price_quality_factor[25]:.2f}")
+    print(f"  Price quality factor at age 40: {price_quality_factor[40]:.2f}")
     print(f"  Averaging credits (ages 1-{params.carbon_credit_max_age}): {DeltaC_avg.sum():.1f} tCO₂/ha")
     print(f"  Permanent credits (all ages): continue indefinitely")
     
@@ -1275,25 +1044,41 @@ def main():
     print(f"  Carbon price range: ${price_data['pc_grid'][0]:.0f} - ${price_data['pc_grid'][-1]:.0f}")
     print(f"  Timber price range: ${price_data['pt_grid'][0]:.0f} - ${price_data['pt_grid'][-1]:.0f}")
     
-    # Plot simulated price paths
-    if not args.no_plots:
+    # Plot simulated price paths (always if --price-paths-only, otherwise if not --no-plots)
+    if args.price_paths_only:
         print("\n--- Simulating Price Paths ---")
         try:
-            plot_price_paths(params, n_paths=1000, n_periods=100, 
-                           save_path='price_paths.png')
+            os.makedirs('plots', exist_ok=True)
+            # Simulate paths just for the plot (this function is now moved/removed, but we need the logic or just skip)
+            # Actually, the user asked to remove plotting logic. 
+            # If price-paths-only is requested, we should probably just exit or use the new script?
+            # Let's assume we just save the pickle and let the other script handle it.
+            pass
         except Exception as e:
             print(f"  Could not generate price paths plot: {e}")
+    
+    # Exit early if only price paths requested (and we're not doing them here anymore)
+    if args.price_paths_only:
+        print("\n" + "=" * 70)
+        print("PRICE PATHS ONLY REQUESTED - PLEASE RUN plot_results.py")
+        print("=" * 70)
+        return None, None, None
     
     # Build state space
     print("\n--- Building State Space ---")
     state_space = build_state_space(params)
+    # np.savetxt('state_space.csv', state_space, delimiter=',')
     
     print(f"  Total states: {state_space.N_states:,}")
     print(f"  Actions: {N_ACTIONS}")
     
     # Build reward matrix
     print("\n--- Building Reward Matrix ---")
-    R = build_reward_matrix(params, state_space, price_data, V_age, C_age, DeltaC_avg, DeltaC_perm)
+    R = build_reward_matrix(params, state_space, price_data, V_age, C_age, DeltaC_avg, DeltaC_perm, price_quality_factor)
+    
+    # Save labeled reward matrix CSV
+    save_reward_matrix_csv(R, state_space, price_data, 'reward_matrix.csv')
+    print(f"  Saved labeled reward matrix to reward_matrix.csv")
     print(f"  Shape: {R.shape}")
     
     # Build transition matrix
@@ -1303,29 +1088,48 @@ def main():
     
     # Solve
     print("\n--- Solving DP (Infinite Horizon) ---")
+    start_time = time.time()
     V, sigma = solve_model(R, Q, params.beta)
+    end_time = time.time()
+    print(f"  Time taken: {end_time - start_time:.2f} seconds")
     print("  ✓ Solution found")
     
     # Analyze policy
     results = analyze_policy(sigma, state_space, params, price_data)
     
-    # Run sanity checks
-    run_sanity_checks(params)
+    # Run sanity checks (optional, can be run separately via sanity_checks.py)
+    # Uncomment the line below if you want sanity checks to run automatically
+    # from sanity_checks import run_sanity_checks
+    # run_sanity_checks(params)
     
-    # Plot results
-    if not args.no_plots:
-        print("\n--- Generating Visualizations ---")
-        try:
-            plot_harvest_regions(sigma, state_space, params, price_data, 
-                                max_age_plot=50,
-                                save_path='harvest_regions.png')
-            plot_harvest_regions_by_price(sigma, state_space, params, price_data,
-                                         save_path='harvest_regions_by_price.png')
-            plot_value_function(V, state_space, params, price_data,
-                               max_age_plot=50,
-                               save_path='value_function.png')
-        except Exception as e:
-            print(f"  Could not generate plots (may need display): {e}")
+    # Simulate single trajectory (analysis)
+    print("\n--- Simulating Optimal Trajectory ---")
+    sim_data = simulate_single_trajectory(
+        params, state_space, price_data, R, Q, V, sigma, C_age,
+        n_years=50, seed=42
+    )
+
+    # Save results to pickle
+    print("\n--- Saving Results to Pickle ---")
+    import pickle
+    os.makedirs(args.temp_dir, exist_ok=True)
+    pickle_path = os.path.join(args.temp_dir, 'model_results.pkl')
+    
+    results_data = {
+        'params': params,
+        'state_space': state_space,
+        'price_data': price_data,
+        'V': V,
+        'sigma': sigma,
+        'sim_data': sim_data,
+        # 'C_age': C_age # Not strictly needed if params and growth functions are available, but helpful
+    }
+    
+    with open(pickle_path, 'wb') as f:
+        pickle.dump(results_data, f)
+    
+    print(f"  Results saved to {pickle_path}")
+    print("  Run 'python plot_results.py' to generate plots.")
     
     print("\n" + "=" * 70)
     print("MODEL EXECUTION COMPLETE")
