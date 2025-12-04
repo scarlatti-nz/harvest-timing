@@ -37,8 +37,8 @@ class ModelParameters:
     
     # Price process parameters (AR(1) in logs)
     # Carbon price
-    pc_mean: float = 20.0      # Mean carbon price ($/tCO2)
-    pc_rho: float = 0.8        # AR(1) persistence
+    pc_mean: float = 50.0      # Mean carbon price ($/tCO2)
+    pc_rho: float = 0.95        # AR(1) persistence
     pc_sigma: float = 0.178     # Volatility of log price
     
     # Timber price
@@ -51,6 +51,7 @@ class ModelParameters:
     harvest_cost_flat_per_ha: float = 12500.0  # Flat harvest cost per hectare
     replant_cost: float = 2000.0        # $ per hectare
     maintenance_cost: float = 50.0      # $ per year per hectare
+    # switch_cost: float = 1e9            # hack to disable switching for utility comparison
     switch_cost: float = 500.0          # Admin cost to switch to permanent
     
     # Optional harvest penalty ($/m³) - set to 0 to disable
@@ -785,7 +786,10 @@ def simulate_single_trajectory(
     n_years: int = 50,
     seed: Optional[int] = 42,
     carbon_prices: Optional[np.ndarray] = None,
-    timber_prices: Optional[np.ndarray] = None
+    timber_prices: Optional[np.ndarray] = None,
+    initial_age: int = 1,
+    initial_regime: int = 0,
+    initial_rotation: int = 1
 ) -> Dict:
     """
     Simulate a single trajectory of optimal policy execution with random prices.
@@ -839,12 +843,10 @@ def simulate_single_trajectory(
         'carbon_stock': np.zeros(n_years + 1),
     }
     
-    # 3. Initial state: Averaging, 1st Rotation, Age 1 (or 0? Model starts at 0 usually)
-    # User said "stand age 1-50", let's start at age 1 to match "1st rotation averaging forest"
-    # But state space starts at 0. Let's start at age 1.
-    current_age = 1
-    current_regime = 0
-    current_rotation = 1
+    # 3. Initial state
+    current_age = initial_age
+    current_regime = initial_regime
+    current_rotation = initial_rotation
     
     # Pre-compute expected continuation values vector E[V(s')] = sum_s' P(s'|s,a) V(s')
     # Since Q is (N_actions, N_states, N_states), we can do matrix-vector multiplication
