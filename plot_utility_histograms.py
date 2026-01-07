@@ -6,13 +6,99 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pickle
 import os
+import argparse
 from tqdm import tqdm
 from harvest_timing_model import (
     ModelParameters, StateSpace, simulate_single_trajectory,
     compute_carbon_curve, compute_volume_from_carbon,
     compute_carbon_flows_averaging, compute_carbon_flows_permanent,
-    compute_price_quality_factor, build_reward_matrix, build_transition_matrix
+    compute_price_quality_factor, build_reward_matrix, build_transition_matrix,
+    ACTION_DO_NOTHING, ACTION_HARVEST_REPLANT, ACTION_SWITCH_PERMANENT, N_ACTIONS
 )
+
+
+def build_reward_components(
+    params: ModelParameters,
+    state_space: StateSpace,
+    price_data,
+    V_age,
+    C_age,
+    DeltaC_avg,
+    DeltaC_perm,
+    price_quality_factor
+):
+    """
+    Build carbon and timber components matching build_reward_matrix logic.
+    Returns two arrays of shape (N_states, N_ACTIONS).
+    """
+    carbon_component = np.zeros((state_space.N_states, N_ACTIONS))
+    timber_component = np.zeros_like(carbon_component)
+
+    pc_grid = price_data['pc_grid']
+    pt_grid = price_data['pt_grid']
+    liability_npv_factor = params.carbon_liability_npv_factor()
+
+    for s in range(state_space.N_states):
+        a, i_pc, i_pt, regime, rotation = state_space.state_to_tuple[s]
+
+        pc = pc_grid[i_pc]
+        pt = pt_grid[i_pt]
+        volume = V_age[a]
+        carbon_stock = C_age[a]
+
+        # Carbon flow depends on regime/rotation
+        if regime == 0:  # Averaging
+            delta_C = DeltaC_avg[a] if rotation == 1 else 0.0
+        else:  # Permanent (regime=1) or Permanent No Penalty (regime=2)
+            delta_C = DeltaC_perm[a]
+
+        # Shared pieces
+        R_carbon = pc * delta_C
+        R_cost = -params.maintenance_cost
+        effective_pt = pt * price_quality_factor[a]
+
+        # Action 0: Do nothing
+        carbon_component[s, ACTION_DO_NOTHING] = R_carbon
+        timber_component[s, ACTION_DO_NOTHING] = R_cost
+
+        # Action 1: Harvest and replant
+        # Harvest penalty only applies to permanent (regime=1), not to
+        # averaging (regime=0) or pre-2023 stock change (regime=2)
+        harvest_cost_per_m3 = params.harvest_cost_per_m3
+        if regime == 1:  # Permanent incurs penalty
+            harvest_cost_per_m3 += params.harvest_penalty_per_m3
+
+        R_timber = effective_pt * volume - harvest_cost_per_m3 * volume
+        R_replant = -params.replant_cost
+        R_harvest_flat = -params.harvest_cost_flat_per_ha
+
+        # Carbon liability applies to both permanent (regime=1) and pre-2023 stock-change (regime=2)
+        carbon_liability = 0.0
+        if regime >= 1:
+            carbon_liability = pc * carbon_stock * liability_npv_factor
+
+        carbon_component[s, ACTION_HARVEST_REPLANT] = -carbon_liability
+        timber_component[s, ACTION_HARVEST_REPLANT] = R_timber + R_replant + R_harvest_flat
+
+        # Action 2: Switch to permanent (only from averaging)
+        # Cannot switch into pre-2023 stock change from any regime
+        if regime == 0:
+            switch_penalty = params.switch_cost
+            carbon_shortfall_penalty = 0.0
+            if rotation >= 2 and a < params.carbon_credit_max_age:
+                carbon_at_16 = C_age[params.carbon_credit_max_age]
+                carbon_shortfall = max(0.0, carbon_at_16 - carbon_stock)
+                carbon_shortfall_penalty = pc * carbon_shortfall
+                switch_penalty += carbon_shortfall_penalty
+
+            carbon_component[s, ACTION_SWITCH_PERMANENT] = R_carbon - carbon_shortfall_penalty
+            timber_component[s, ACTION_SWITCH_PERMANENT] = R_cost - params.switch_cost
+        else:
+            # Permanent or pre-2023 stock change regime: identical to do-nothing
+            carbon_component[s, ACTION_SWITCH_PERMANENT] = carbon_component[s, ACTION_DO_NOTHING]
+            timber_component[s, ACTION_SWITCH_PERMANENT] = timber_component[s, ACTION_DO_NOTHING]
+
+    return carbon_component, timber_component
 
 def run_simulations(
     n_sims: int,
@@ -26,13 +112,23 @@ def run_simulations(
     V,
     sigma,
     C_age,
+    reward_components,
     n_years: int = 200
 ):
-    """Run N simulations and return list of NPVs."""
+    """Run N simulations and return list of NPVs, harvest ages and average prices."""
     npvs = []
+    carbon_npvs = []
+    timber_npvs = []
+    harvest_ages = []
+    avg_carbon_prices = []
+    avg_timber_prices = []
+
+    carbon_component, timber_component = reward_components
+    pc_grid = price_data['pc_grid']
+    pt_grid = price_data['pt_grid']
     
     # Pre-generate seeds to ensure reproducibility but independence
-    np.random.seed(42 + regime * 100 + rotation)
+    np.random.seed(23665616)
     seeds = np.random.randint(0, 1000000, size=n_sims)
     
     print(f"Simulating {n_sims} trajectories for Regime={regime}, Rotation={rotation}...")
@@ -59,100 +155,368 @@ def run_simulations(
         npv = np.sum(rewards[:min_len] * discounts[:min_len])
         
         npvs.append(npv)
+
+        # Record average prices
+        avg_carbon_prices.append(np.mean(data['carbon_price']))
+        avg_timber_prices.append(np.mean(data['timber_price']))
+
+        # Record first harvest age
+        harvest_indices = np.where(data['action'] == ACTION_HARVEST_REPLANT)[0]
+        if len(harvest_indices) > 0:
+            first_harvest_idx = harvest_indices[0]
+            harvest_ages.append(data['age'][first_harvest_idx])
+        else:
+            harvest_ages.append(np.nan)
+
+        # Decompose into carbon vs timber components using the recorded states/actions
+        carbon_flows = np.zeros(min_len)
+        timber_flows = np.zeros(min_len)
+        for t in range(min_len):
+            age = data['age'][t]
+            regime_t = data['regime'][t]
+            rotation_t = data['rotation'][t]
+            action = data['action'][t]
+
+            i_pc = (np.abs(pc_grid - data['carbon_price'][t])).argmin()
+            i_pt = (np.abs(pt_grid - data['timber_price'][t])).argmin()
+
+            s = state_space.tuple_to_state[(age, i_pc, i_pt, regime_t, rotation_t)]
+            carbon_flows[t] = carbon_component[s, action]
+            timber_flows[t] = timber_component[s, action]
+
+        carbon_npvs.append(np.sum(carbon_flows * discounts[:min_len]))
+        timber_npvs.append(np.sum(timber_flows * discounts[:min_len]))
         
-    return np.array(npvs)
+    return np.array(npvs), np.array(carbon_npvs), np.array(timber_npvs), np.array(harvest_ages), np.array(avg_carbon_prices), np.array(avg_timber_prices)
 
 def main():
-    pickle_path = 'noswitch/model_results.pkl'
-    if not os.path.exists(pickle_path):
-        print("Model results not found. Please run harvest_timing_model.py first.")
-        return
+    parser = argparse.ArgumentParser(description="Generate histograms of simulated utilities")
+    parser.add_argument('--rerun', action='store_true', help='Force rerun of simulations even if cached CSVs exist')
+    args = parser.parse_args()
 
-    print(f"Loading results from {pickle_path}...")
-    with open(pickle_path, 'rb') as f:
-        results = pickle.load(f)
-    
-    params = results['params']
-    state_space = results['state_space']
-    price_data = results['price_data']
-    V = results['V']
-    sigma = results['sigma']
-    
-    # Rebuild matrices if needed (usually R and Q are large, maybe not pickled? 
-    # Check pickle content in harvest_timing_model.py. 
-    # It pickles V, sigma, but R and Q are not in the list of saved items in harvest_timing_model.py lines 1118-1126.
-    # So we need to rebuild them.)
-    
-    print("Rebuilding matrices...")
-    C_age = compute_carbon_curve(params)
-    V_age = compute_volume_from_carbon(C_age, params)
-    DeltaC_avg = compute_carbon_flows_averaging(C_age, params)
-    DeltaC_perm = compute_carbon_flows_permanent(C_age)
-    price_quality_factor = compute_price_quality_factor(params)
-    
-    R = build_reward_matrix(params, state_space, price_data, V_age, C_age, DeltaC_avg, DeltaC_perm, price_quality_factor)
-    Q = build_transition_matrix(params, state_space, price_data)
+    scenarios = [
+        {
+            'name': 'Averaging',
+            'dir': '1-to-50',
+            'regime': 0,
+            'rotation': 1,
+            'color': '#3498db',
+            'color_carbon': '#16a085',
+            'color_timber': '#2980b9'
+        },
+        # {
+        #     'name': 'Averaging (Force harvest at age 28)',
+        #     'dir': 'averaging-no-switch',
+        #     'regime': 0,
+        #     'rotation': 1,
+        #     'color': '#3498db',
+        #     'color_carbon': '#16a085',
+        #     'color_timber': '#2980b9',
+        #     'force_age': 28,
+        #     'linestyle': '--'
+        # },
+        {
+            'name': 'Permanent (No Harvest)',
+            'dir': '1-to-50',
+            'regime': 1,
+            'rotation': 1,
+            'color': '#e67e22',
+            'color_carbon': '#d35400',
+            'color_timber': '#f39c12'
+        },
+        {
+            'name': 'Pre-2023 Stock Change',
+            'dir': '1-to-50',
+            'regime': 2,
+            'rotation': 1,
+            'color': '#8e44ad',
+            'color_carbon': '#27ae60',
+            'color_timber': '#8e44ad'
+        },
+
+        {
+            'name': 'Stock Change (Force harvest at age 28)',
+            'dir': '1-to-50',
+            'regime': 2,
+            'rotation': 1,
+            'color': '#27ae60',
+            'color_carbon': '#16a085',
+            'color_timber': '#2980b9',
+            'force_age': 28,
+            'linestyle': '--'
+        }
+    ]
+
+    results_storage = []
     
     # Simulation settings
     N_SIMS = 1000
-    N_YEARS = 200 # Long horizon to approximate infinite horizon NPV
+    N_YEARS = 50 
+
+    for sc in scenarios:
+        csv_path = os.path.join('outputs', sc['dir'], f"{sc['name']}_realized_npvs.csv")
+        
+        # Try to load from cache if not rerunning
+        if not args.rerun and os.path.exists(csv_path):
+            print(f"\n--- Loading Cached Scenario: {sc['name']} ---")
+            try:
+                # Use genfromtxt to handle headers and potential NaNs in harvest_age
+                data = np.genfromtxt(csv_path, delimiter=',', names=True, skip_header=0)
+                
+                # Check if all required columns are present
+                required_cols = {'carbon', 'timber', 'total', 'avg_pc', 'avg_pt', 'harvest_age'}
+                if required_cols.issubset(set(data.dtype.names)):
+                    results_storage.append({
+                        'scenario': sc,
+                        'npvs': data['total'],
+                        'carbon': data['carbon'],
+                        'timber': data['timber'],
+                        'harvest_ages': data['harvest_age'],
+                        'avg_pc': data['avg_pc'],
+                        'avg_pt': data['avg_pt']
+                    })
+                    print(f"  Successfully loaded {len(data)} samples from {csv_path}")
+                    continue
+                else:
+                    print(f"  Warning: Cache file {csv_path} is missing required columns. Rerunning...")
+            except Exception as e:
+                print(f"  Error loading cache {csv_path}: {e}. Rerunning...")
+
+        # If we reach here, we either forced rerun or cache was invalid/missing
+        pickle_path = os.path.join('outputs', sc['dir'], 'model_results.pkl')
+        if not os.path.exists(pickle_path):
+            print(f"Warning: {pickle_path} not found. Skipping.")
+            continue
+
+        print(f"\n--- Processing Scenario: {sc['name']} ---")
+        print(f"Loading results from {pickle_path}...")
+        with open(pickle_path, 'rb') as f:
+            res = pickle.load(f)
+        
+        params = res['params']
+        state_space = res['state_space']
+        price_data = res['price_data']
+        V = res['V']
+        sigma = res['sigma']
+        
+        # Override policy if force_age is specified
+        if 'force_age' in sc:
+            print(f"  Overriding policy to force harvest at age {sc['force_age']}...")
+            new_sigma = np.zeros_like(sigma)
+            target_age = sc['force_age']
+            for s_idx in range(state_space.N_states):
+                a, _, _, _, _ = state_space.state_to_tuple[s_idx]
+                # Force harvest at target_age, do nothing otherwise
+                if a == target_age:
+                    new_sigma[s_idx] = ACTION_HARVEST_REPLANT
+                else:
+                    new_sigma[s_idx] = ACTION_DO_NOTHING
+            sigma = new_sigma
+
+        print("Rebuilding matrices...")
+        C_age = compute_carbon_curve(params)
+        V_age = compute_volume_from_carbon(C_age, params)
+        DeltaC_avg = compute_carbon_flows_averaging(C_age, params)
+        DeltaC_perm = compute_carbon_flows_permanent(C_age)
+        price_quality_factor = compute_price_quality_factor(params)
+        
+        R = build_reward_matrix(params, state_space, price_data, V_age, C_age, DeltaC_avg, DeltaC_perm, price_quality_factor)
+        Q = build_transition_matrix(params, state_space, price_data)
+        reward_components = build_reward_components(params, state_space, price_data, V_age, C_age, DeltaC_avg, DeltaC_perm, price_quality_factor)
+        
+        npvs, carbon_npvs, timber_npvs, harvest_ages, avg_pc, avg_pt = run_simulations(
+            N_SIMS, 
+            regime=sc['regime'], 
+            rotation=sc['rotation'],
+            params=params,
+            state_space=state_space,
+            price_data=price_data,
+            R=R, Q=Q, V=V, sigma=sigma, C_age=C_age,
+            reward_components=reward_components,
+            n_years=N_YEARS
+        )
+        
+        results_storage.append({
+            'scenario': sc,
+            'npvs': npvs,
+            'carbon': carbon_npvs,
+            'timber': timber_npvs,
+            'harvest_ages': harvest_ages,
+            'avg_pc': avg_pc,
+            'avg_pt': avg_pt
+        })
+
+        # Save realized NPVs and prices to CSV (including harvest_age for caching)
+        os.makedirs(os.path.join('outputs', sc['dir']), exist_ok=True)
+        data_to_save = np.column_stack((carbon_npvs, timber_npvs, npvs, avg_pc, avg_pt, harvest_ages))
+        np.savetxt(csv_path, data_to_save, delimiter=',', header='carbon,timber,total,avg_pc,avg_pt,harvest_age', comments='')
+        print(f"  Saved realized results to {csv_path}")
+
+    if not results_storage:
+        print("No results loaded. Exiting.")
+        return
+
+    # Print summary statistics
+    print("\n" + "=" * 50)
+    print(f"{'Scenario':<25} | {'Mean NPV':<12} | {'Std Dev':<12}")
+    print("-" * 50)
+    for res in results_storage:
+        sc = res['scenario']
+        npvs = res['npvs']
+        mean_val = np.mean(npvs)
+        std_val = np.std(npvs)
+        print(f"{sc['name']:<25} | ${mean_val:>10,.0f} | ${std_val:>10,.0f}")
+    print("=" * 50 + "\n")
+
+    # 1. Main NPV Distributions
+    print("\nGenerating main histogram plot...")
+    if len(results_storage) <=4 :
+        n_cols = 1
+        n_rows = len(results_storage)
+    else:
+        n_cols = 2
+        n_rows = int(np.ceil(len(results_storage)/2))
     
-    # 1. Averaging, First Rotation
-    npvs_avg = run_simulations(
-        N_SIMS, 
-        regime=0, 
-        rotation=1,
-        params=params,
-        state_space=state_space,
-        price_data=price_data,
-        R=R, Q=Q, V=V, sigma=sigma, C_age=C_age,
-        n_years=N_YEARS
-    )
-    
-    # 2. Permanent
-    npvs_perm = run_simulations(
-        N_SIMS, 
-        regime=1, 
-        rotation=1, # Rotation index doesn't matter much for permanent, but 1 is fine
-        params=params,
-        state_space=state_space,
-        price_data=price_data,
-        R=R, Q=Q, V=V, sigma=sigma, C_age=C_age,
-        n_years=N_YEARS
-    )
-    
-    # Plotting
-    print("Generating plot...")
-    fig, axes = plt.subplots(2, 1, figsize=(10, 12), sharex=True)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(10, 5 * n_rows), sharex=True)
+    if isinstance(axes, np.ndarray):
+        axes = axes.flatten()
+    else:
+        axes = [axes]
     
     # Determine common bins
-    all_data = np.concatenate([npvs_avg, npvs_perm])
-    min_val = np.min(all_data)
-    max_val = np.max(all_data)
+    all_npvs = np.concatenate([r['npvs'] for r in results_storage])
+    min_val = np.min(all_npvs)
+    max_val = np.max(all_npvs)
     bins = np.linspace(min_val, max_val, 50)
     
-    # Panel 1: Averaging
-    axes[0].hist(npvs_avg, bins=bins, color='#3498db', alpha=0.7, edgecolor='black')
-    axes[0].axvline(np.mean(npvs_avg), color='red', linestyle='dashed', linewidth=2, label=f'Mean: ${np.mean(npvs_avg):,.0f}')
-    axes[0].set_title('Distribution of Realized Utilities: First Rotation Averaging', fontsize=14, fontweight='bold')
-    axes[0].set_ylabel('Frequency', fontsize=12)
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-    
-    # Panel 2: Permanent
-    axes[1].hist(npvs_perm, bins=bins, color='#8e44ad', alpha=0.7, edgecolor='black')
-    axes[1].axvline(np.mean(npvs_perm), color='red', linestyle='dashed', linewidth=2, label=f'Mean: ${np.mean(npvs_perm):,.0f}')
-    axes[1].set_title('Distribution of Realized Utilities: Permanent Regime', fontsize=14, fontweight='bold')
-    axes[1].set_xlabel('Net Present Value ($/ha)', fontsize=12)
-    axes[1].set_ylabel('Frequency', fontsize=12)
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
+    for i, res in enumerate(results_storage):
+        sc = res['scenario']
+        npvs = res['npvs']
+        ax = axes[i]
+        
+        ax.hist(npvs, bins=bins, color=sc['color'], alpha=0.7, edgecolor='black')
+        ax.axvline(np.mean(npvs), color='red', linestyle='dashed', linewidth=2, 
+                  label=f'Mean: ${np.mean(npvs):,.0f}')
+        ax.set_title(f'{sc["name"]}', fontsize=14, fontweight='bold')
+        ax.set_ylabel('Frequency', fontsize=12)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+    axes[-1].set_xlabel('Net Present Value ($/ha)', fontsize=12)
     
     plt.tight_layout()
     output_path = 'plots/utility_histograms.png'
     os.makedirs('plots', exist_ok=True)
     plt.savefig(output_path, dpi=150)
-    print(f"Plot saved to {output_path}")
+    print(f"Main plot saved to {output_path}")
+
+    # 1b. CDF of NPVs (All scenarios on one plot)
+    print("Generating CDF plot...")
+    plt.figure(figsize=(10, 7))
+    for res in results_storage:
+        sc = res['scenario']
+        npvs = np.sort(res['npvs'])
+        cdf = np.arange(1, len(npvs) + 1) / len(npvs)
+        ls = sc.get('linestyle', '-')
+        plt.plot(npvs, cdf, label=sc['name'], color=sc['color'], linewidth=2.5, linestyle=ls)
+    
+    plt.title('Cumulative Distribution of Realized Utilities (NPV)', fontsize=14, fontweight='bold')
+    plt.xlabel('Net Present Value ($/ha)', fontsize=12)
+    plt.ylabel('Cumulative Probability', fontsize=12)
+    plt.legend(fontsize=11)
+    plt.grid(True, alpha=0.3)
+    
+    output_path_cdf = 'plots/utility_cdf.png'
+    plt.savefig(output_path_cdf, dpi=150)
+    plt.close()
+    print(f"CDF plot saved to {output_path_cdf}")
+
+    # 2. Carbon vs Timber Components
+    print("Generating component plot...")
+    fig2, axes2 = plt.subplots(n_rows, n_cols, figsize=(10, 5 * n_rows), sharex=True)
+    if isinstance(axes2, np.ndarray):
+        axes2 = axes2.flatten()
+    else:
+        axes2 = [axes2]
+
+    def plot_components(ax, carbon_vals, timber_vals, title, color_carbon, color_timber):
+        combined_min = min(np.min(carbon_vals), np.min(timber_vals))
+        combined_max = max(np.max(carbon_vals), np.max(timber_vals))
+        bins = np.linspace(combined_min, combined_max, 50)
+
+        ax.hist(timber_vals, bins=bins, color=color_timber, alpha=0.6, edgecolor='black', label='Timber utility')
+        ax.axvline(np.mean(timber_vals), color=color_timber, linestyle='dashed', linewidth=2, label=f'Timber mean: ${np.mean(timber_vals):,.0f}')
+
+        ax.hist(carbon_vals, bins=bins, color=color_carbon, alpha=0.6, edgecolor='black', label='Carbon utility')
+        ax.axvline(np.mean(carbon_vals), color=color_carbon, linestyle='dashed', linewidth=2, label=f'Carbon mean: ${np.mean(carbon_vals):,.0f}')
+
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_ylabel('Frequency', fontsize=12)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+    for i, res in enumerate(results_storage):
+        sc = res['scenario']
+        plot_components(
+            axes2[i], res['carbon'], res['timber'],
+            title=f'Utility Components: {sc["name"]}',
+            color_carbon=sc['color_carbon'], color_timber=sc['color_timber']
+        )
+    
+    axes2[-1].set_xlabel('Net Present Value ($/ha)', fontsize=12)
+
+    plt.tight_layout()
+    output_path_components = 'plots/utility_histograms_components.png'
+    plt.savefig(output_path_components, dpi=150)
+    print(f"Component plot saved to {output_path_components}")
+
+    # 3. Age at First Harvest
+    print("Generating harvest age plot...")
+    fig3, axes3 = plt.subplots(n_rows, n_cols, figsize=(10, 5 * n_rows), sharex=True)
+    if isinstance(axes3, np.ndarray):
+        axes3 = axes3.flatten()
+    else:
+        axes3 = [axes3]
+
+    # Determine common bins for ages
+    # Filter out NaNs for bin calculation
+    all_ages = np.concatenate([r['harvest_ages'][~np.isnan(r['harvest_ages'])] for r in results_storage])
+    if len(all_ages) > 0:
+        min_age = np.min(all_ages)
+        max_age = np.max(all_ages)
+        # Use integer bins for ages
+        age_bins = np.arange(min_age, max_age + 2) - 0.5
+    else:
+        age_bins = 20
+
+    for i, res in enumerate(results_storage):
+        sc = res['scenario']
+        ages = res['harvest_ages']
+        # Remove NaNs for plotting
+        valid_ages = ages[~np.isnan(ages)]
+        n_no_harvest = np.sum(np.isnan(ages))
+        
+        ax = axes3[i]
+        if len(valid_ages) > 0:
+            ax.hist(valid_ages, bins=age_bins, color=sc['color'], alpha=0.7, edgecolor='black')
+            ax.axvline(np.mean(valid_ages), color='red', linestyle='dashed', linewidth=2, 
+                      label=f'Mean Age: {np.mean(valid_ages):.1f}')
+        
+        title = f'{sc["name"]}'
+        if n_no_harvest > 0:
+            title += f' ({n_no_harvest}/{len(ages)} never harvested)'
+            
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_ylabel('Frequency', fontsize=12)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+    axes3[-1].set_xlabel('Age at First Harvest (years)', fontsize=12)
+
+    plt.tight_layout()
+    output_path_ages = 'plots/harvest_age_histograms.png'
+    plt.savefig(output_path_ages, dpi=150)
+    print(f"Harvest age plot saved to {output_path_ages}")
 
 if __name__ == "__main__":
     main()

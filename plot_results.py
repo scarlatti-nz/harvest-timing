@@ -43,7 +43,7 @@ def plot_price_paths(
     # Simulate paths
     carbon_paths = simulate_price_paths(
         params.pc_mean, params.pc_rho, params.pc_sigma,
-        n_paths=n_paths, n_periods=n_periods, seed=42
+        n_paths=n_paths, n_periods=n_periods, seed=42, p0=params.pc_0
     )
     timber_paths = simulate_price_paths(
         params.pt_mean, params.pt_rho, params.pt_sigma,
@@ -516,6 +516,7 @@ def plot_simulation_trajectory(
     # Color differently based on regime
     regime_0_mask = data['regime'] == 0
     regime_1_mask = data['regime'] == 1
+    regime_2_mask = data['regime'] == 2
     
     # We can't easily use mask for line plot connectivity. 
     # Just plot entire line, then overlay?
@@ -527,6 +528,8 @@ def plot_simulation_trajectory(
                color='#f1c40f', s=20, label='Averaging Regime')
     ax.scatter(years[regime_1_mask], data['carbon_stock'][regime_1_mask], 
                color='#8e44ad', s=20, label='Permanent Regime')
+    ax.scatter(years[regime_2_mask], data['carbon_stock'][regime_2_mask], 
+               color='#27ae60', s=20, label='Permanent (No Penalty)')
 
     ax.set_ylabel('Carbon Stock (tCO₂/ha)', fontsize=12)
     ax.set_title('Forest Carbon Stock', fontsize=14, fontweight='bold')
@@ -601,7 +604,7 @@ def main():
     
     # Determine pickle path
     if args.pickle_path is None:
-        pickle_path = os.path.join(args.temp_dir, 'model_results.pkl')
+        pickle_path = os.path.join('outputs', args.temp_dir, 'model_results.pkl')
     else:
         pickle_path = args.pickle_path
     

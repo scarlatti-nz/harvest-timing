@@ -57,7 +57,8 @@ def _print_scenario_details(
     print(f"    Discount rate: {params.discount_rate:.1%}")
     print(f"    Carbon credits max age: {params.carbon_credit_max_age}")
     
-    regime_name = "averaging" if regime == 0 else "permanent"
+    regime_names = {0: "averaging", 1: "permanent", 2: "pre-2023 stock change"}
+    regime_name = regime_names.get(regime, f"regime_{regime}")
     rot_name = "first" if rotation == 1 else "later"
     
     print(f"\n  State trajectory starting from (regime={regime_name}, rotation={rot_name}):")
@@ -126,7 +127,7 @@ def _print_scenario_details(
         print(f"    Replant cost:   -${params.replant_cost:,.2f}")
         print(f"    Net timber:     ${net_timber:,.2f}")
         
-        if regime == 1:  # Permanent
+        if regime >= 1:  # Permanent or Permanent No Penalty
             liability_factor = params.carbon_liability_npv_factor()
             liability = pc * carbon * liability_factor
             print(f"    Carbon liability: -${liability:,.2f} ({carbon:.1f} tCO₂ × ${pc:.2f} × {liability_factor:.3f})")
@@ -269,5 +270,6 @@ if __name__ == "__main__":
     print("REAL OPTIONS MODEL - SANITY CHECKS ONLY")
     print("=" * 70)
     run_sanity_checks()
+
 
 

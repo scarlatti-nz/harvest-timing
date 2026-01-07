@@ -4,16 +4,25 @@ Real Options Model for Forest Harvest Timing
 Infinite-horizon DP using QuantEcon's DiscreteDP. State includes age, prices, 
 ETS regime, and rotation number. Carbon credits earned only in first rotation
 (averaging) up to age 16. Permanent regime has carbon liability on harvest.
+
+Regimes:
+- averaging (0): Carbon credits up to age 16 in first rotation only, no carbon 
+  liability on harvest
+- permanent (1): Carbon credits indefinitely, carbon liability on harvest, 
+  harvest penalty applies
+- pre-2023 stock-change (2): Same as permanent but ignores harvest penalty. 
+  Cannot be switched into from any other regime.
 """
 
 import numpy as np
 from quantecon.markov import tauchen, DiscreteDP
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from typing import Tuple, Dict, Optional
 import warnings
 import argparse
 import os
 import time
+import datetime
 
 
 # =============================================================================
@@ -28,34 +37,35 @@ class ModelParameters:
     discount_rate: float = 0.06
     
     # Age parameters
-    A_max: int = 50  # Maximum age in state space (no forced harvest)
-    carbon_credit_max_age: int = 16  # Carbon credits stop at this age
+    A_max: int = 52  # Maximum age in state space 
+    carbon_credit_max_age: int = 16  # Carbon credits stop at this age under averaging
     
     # Price grid sizes
-    N_pt: int = 10   # Number of timber price states
-    N_pc: int = 10   # Number of carbon price states
+    N_pt: int = 9   # Number of timber price states
+    N_pc: int = 9   # Number of carbon price states
     
     # Price process parameters (AR(1) in logs)
     # Carbon price
+    pc_0: float = 50.0      # Initial carbon price ($/tCO2)
     pc_mean: float = 50.0      # Mean carbon price ($/tCO2)
-    pc_rho: float = 0.95        # AR(1) persistence
-    pc_sigma: float = 0.178     # Volatility of log price
+    pc_rho: float = 0.96        # AR(1) persistence
+    pc_sigma: float = 0.2     # Volatility of log price
     
     # Timber price
     pt_mean: float = 150.0     # Mean timber price ($/m³)
     pt_rho: float = 0.63       # AR(1) persistence
-    pt_sigma: float = 0.15     # Volatility of log price
+    pt_sigma: float = 0.05     # Volatility of log price
     
     # Cost parameters
     harvest_cost_per_m3: float = 46.0   # $/m³
     harvest_cost_flat_per_ha: float = 12500.0  # Flat harvest cost per hectare
     replant_cost: float = 2000.0        # $ per hectare
     maintenance_cost: float = 50.0      # $ per year per hectare
-    # switch_cost: float = 1e9            # hack to disable switching for utility comparison
-    switch_cost: float = 500.0          # Admin cost to switch to permanent
+    switch_cost: float = 1e9            # hack to disable switching for utility comparison
+    # switch_cost: float = 10.0          # Admin cost to switch to permanent - $10/ha based on reality of per-forest fee of $700 and area of 70ha. Basically negligible.
     
-    # Optional harvest penalty ($/m³) - set to 0 to disable
-    harvest_penalty_per_m3: float = 10.0
+    # Optional harvest penalty ($/m³) - $10 reflects current legislated penalty but can set aribtrarily high to completely disallow harvest of permanent regime
+    harvest_penalty_per_m3: float = 10000.0
     
     # Permanent regime carbon liability parameters
     # On harvest: pay carbon_price * carbon_stock
@@ -64,9 +74,11 @@ class ModelParameters:
     carbon_liability_instant_fraction: float = 0.5
     
     # Growth parameters
-    C_max: float = 2622.0    # Maximum carbon stock (tCO2/ha)
-    k_carbon: float = 0.038  # Carbon accumulation rate
-    timber_per_tonne_carbon: float = 1.2  # Timber volume (m³) per tonne of carbon
+    C_max: float = 2221.0    # Maximum carbon stock (tCO2/ha)
+    k_carbon: float = 0.0395  # Carbon accumulation rate
+    raw_timber_m3_per_tonne_carbon: float = 1.2  # Timber volume (m³) per tonne of carbon
+    recovery_rate: float = 0.5  # Proportion of total timber volume that is recoverable after harvest, based on ratio of total volume to residual volume in carbon tables
+    timber_per_tonne_carbon: float = raw_timber_m3_per_tonne_carbon * recovery_rate  # Timber volume (m³) per tonne of carbon
     
     @property
     def beta(self) -> float:
@@ -80,8 +92,8 @@ class ModelParameters:
     
     @property
     def N_regimes(self) -> int:
-        """Number of ETS regimes (averaging=0, permanent=1)."""
-        return 2
+        """Number of ETS regimes (averaging=0, permanent=1, pre-2023 stock-change=2)."""
+        return 3
     
     @property
     def N_rotations(self) -> int:
@@ -236,7 +248,7 @@ def discretize_price_process(
     # Convert to log scale for Tauchen
     log_mean = np.log(mean)
     
-    # Unconditional mean of log process: mu in AR(1) is mu = (1-rho)*E[y]
+    # Intercept of log process: mu in AR(1) is mu = (1-rho)*E[y]
     mu = log_mean * (1 - rho)
     
     # Use Tauchen method: tauchen(n, rho, sigma, mu=0.0, n_std=3)
@@ -280,6 +292,7 @@ def simulate_price_paths(
     sigma: float,
     n_paths: int = 1000,
     n_periods: int = 100,
+    p0: Optional[float] = None,
     seed: Optional[int] = 42
 ) -> np.ndarray:
     """
@@ -304,9 +317,13 @@ def simulate_price_paths(
     log_mean = np.log(mean)
     mu = log_mean * (1 - rho)  # Intercept term
     
-    # Initialize log prices at the unconditional mean
-    log_prices = np.zeros((n_paths, n_periods))
-    log_prices[:, 0] = log_mean
+    # Initialize log prices at the unconditional mean or a given initial price if supplied
+    if p0 is not None:
+        log_prices = np.zeros((n_paths, n_periods))
+        log_prices[:, 0] = np.log(p0)
+    else:
+        log_prices = np.zeros((n_paths, n_periods))
+        log_prices[:, 0] = log_mean
     
     # Generate innovations
     innovations = np.random.normal(0, sigma, (n_paths, n_periods - 1))
@@ -459,7 +476,7 @@ def build_reward_matrix(
                 delta_C = DeltaC_avg[a]
             else:
                 delta_C = 0.0
-        else:  # Permanent
+        else:  # Permanent (regime=1) or pre-2023 stock-change (regime=2)
             # Credits continue indefinitely (all ages, all rotations)
             delta_C = DeltaC_perm[a]
         
@@ -470,10 +487,11 @@ def build_reward_matrix(
         
         # === Action 1: Harvest and replant ===
         # Timber revenue minus harvest cost
-        # Harvest penalty only applies to permanent regime (never to averaging)
+        # Harvest penalty only applies to permanent regime (regime=1), not to
+        # averaging (regime=0) or pre-2023 stock-change (regime=2)
         if regime == 1:  # Permanent
             harvest_cost_per_m3 = params.harvest_cost_per_m3 + params.harvest_penalty_per_m3
-        else:  # Averaging
+        else:  # Averaging or pre-2023 stock-change
             harvest_cost_per_m3 = params.harvest_cost_per_m3
         
         # Apply price quality scaling factor
@@ -483,8 +501,8 @@ def build_reward_matrix(
         R_replant = -params.replant_cost
         R_harvest_flat = -params.harvest_cost_flat_per_ha  # Flat harvest cost per hectare
         
-        # Carbon liability for permanent regime
-        if regime == 1:  # Permanent
+        # Carbon liability for permanent regimes (both permanent and pre-2023 stock-change)
+        if regime >= 1:  # Permanent or pre-2023 stock-change
             # Must pay carbon_price * carbon_stock on harvest
             # 50% instant, 50% over 10 years (use NPV)
             carbon_liability = pc * carbon_stock * liability_npv_factor
@@ -494,6 +512,8 @@ def build_reward_matrix(
             R[s, ACTION_HARVEST_REPLANT] = R_timber + R_replant + R_harvest_flat
         
         # === Action 2: Switch to permanent ===
+        # Only meaningful when in averaging (regime=0). Cannot switch INTO
+        # pre-2023 stock-change (regime=2) from any regime.
         if regime == 0:  # Only meaningful when in averaging
             # Pay switch cost, receive carbon flow as in do-nothing
             switch_penalty = params.switch_cost
@@ -509,7 +529,7 @@ def build_reward_matrix(
             
             R[s, ACTION_SWITCH_PERMANENT] = R_carbon + R_cost - switch_penalty
         else:
-            # Already permanent - make identical to do nothing
+            # Already permanent or pre-2023 stock change - make identical to do nothing
             R[s, ACTION_SWITCH_PERMANENT] = R[s, ACTION_DO_NOTHING]
     
     return R
@@ -544,7 +564,7 @@ def save_reward_matrix_csv(
     pc_grid = price_data['pc_grid']
     pt_grid = price_data['pt_grid']
     
-    regime_names = {0: 'averaging', 1: 'permanent'}
+    regime_names = {0: 'averaging', 1: 'permanent', 2: 'pre-2023 stock change'}
     rotation_names = {1: 'first', 2: 'later'}
     
     with open(filename, 'w') as f:
@@ -612,9 +632,9 @@ def build_transition_matrix(
                     regime_next = 1  # Now permanent
                     rotation_next = rotation
                 else:
-                    # Already permanent - same as do nothing
+                    # Already permanent or pre-2023 stock-change - same as do nothing
                     a_next = min(a + 1, params.A_max)
-                    regime_next = regime
+                    regime_next = regime  # Stay in current regime
                     rotation_next = rotation
             
             # Now loop over all possible next price states
@@ -664,7 +684,7 @@ def solve_model(
     
     ddp = DiscreteDP(R, Q_transposed, beta)
     
-    if method == 'policy_iteration':
+    if method == 'value_iteration':
         results = ddp.solve(method='policy_iteration')
     else:
         results = ddp.solve(method='value_iteration')
@@ -699,6 +719,7 @@ def analyze_policy(
         'harvest_by_age_avg_rot1': {},
         'harvest_by_age_avg_rot2': {},
         'harvest_by_age_perm': {},
+        'harvest_by_age_perm_no_penalty': {},
     }
     
     # Analyze for regime=0 (averaging), rotation=1
@@ -768,6 +789,28 @@ def analyze_policy(
     else:
         print("\n  → No harvest optimal in permanent regime at mid prices")
     
+    # Analyze for regime=2 (pre-2023 stock change)
+    print("\nHarvest decisions (pre-2023 stock change regime, mid prices):")
+    print("-" * 60)
+    
+    first_harvest_age_perm_no_penalty = None
+    for a in range(params.N_a):
+        state_tuple = (a, mid_pc, mid_pt, 2, 1)  # pre-2023 stock change, first rotation
+        s = state_space.tuple_to_state[state_tuple]
+        action = sigma[s]
+        
+        results['harvest_by_age_perm_no_penalty'][a] = action
+        
+        if action == ACTION_HARVEST_REPLANT and first_harvest_age_perm_no_penalty is None:
+            first_harvest_age_perm_no_penalty = a
+            action_name = ['Hold', 'Harvest', 'Switch'][action]
+            print(f"  Age {a:2d}: {action_name} ← First harvest age")
+    
+    if first_harvest_age_perm_no_penalty is not None:
+        print(f"\n  → Optimal harvest age (pre-2023 stock change): {first_harvest_age_perm_no_penalty} years")
+    else:
+        print("\n  → No harvest optimal in pre-2023 stock change regime at mid prices")
+    
     return results
 
 
@@ -815,7 +858,8 @@ def simulate_single_trajectory(
     if carbon_prices is None:
         carbon_prices = simulate_price_paths(
             params.pc_mean, params.pc_rho, params.pc_sigma,
-            n_paths=1, n_periods=n_years + 1, seed=price_seed
+            n_paths=1, n_periods=n_years + 1, seed=price_seed, 
+            p0=params.pc_0
         ).flatten()
     
     if timber_prices is None:
@@ -961,12 +1005,6 @@ Examples:
         help='Skip plot generation'
     )
     parser.add_argument(
-        '--harvest-penalty',
-        type=float,
-        default=0.0,
-        help='Additional harvest penalty in $/m³ (default: 0)'
-    )
-    parser.add_argument(
         '--price-paths-only',
         action='store_true',
         help='Generate price paths plot and exit'
@@ -986,11 +1024,34 @@ Examples:
     return parser.parse_args()
 
 
-def main():
+def save_model_parameters_to_txt(params: ModelParameters, directory: str):
+    """
+    Save model parameters to a text file with a timestamp in the specified directory.
+    """
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"model_parameters_{timestamp}.txt"
+    filepath = os.path.join('outputs',directory, filename)
+    
+    with open(filepath, 'w') as f:
+        f.write(f"Model Parameters - Saved at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("=" * 60 + "\n\n")
+        
+        # Get dictionary of parameters
+        param_dict = asdict(params)
+        
+        # Sort keys for readability
+        for key in sorted(param_dict.keys()):
+            f.write(f"{key:35}: {param_dict[key]}\n")
+            
+    return filepath
+
+
+def main(args=None, params=None):
     """
     Main function to run the harvest timing model.
     """
-    args = parse_args()
+    if args is None:
+        args = parse_args()
     
     # If only sanity checks requested, run them and exit
     if args.sanity_checks:
@@ -1005,12 +1066,12 @@ def main():
     print("REAL OPTIONS MODEL FOR FOREST HARVEST TIMING")
     print("=" * 70)
     
-    # Initialize parameters
-    params = ModelParameters(
-        harvest_penalty_per_m3=args.harvest_penalty,
-        N_pt=args.grid_size,
-        N_pc=args.grid_size
-    )
+    # Initialize parameters if not provided
+    if params is None:
+        params = ModelParameters(
+            N_pt=args.grid_size,
+            N_pc=args.grid_size
+        )
     
     print("\n--- Model Parameters ---")
     print(f"  Discount rate: {params.discount_rate:.1%}")
@@ -1112,10 +1173,14 @@ def main():
     )
 
     # Save results to pickle
-    print("\n--- Saving Results to Pickle ---")
+    print("\n--- Saving Results ---")
     import pickle
-    os.makedirs(args.temp_dir, exist_ok=True)
-    pickle_path = os.path.join(args.temp_dir, 'model_results.pkl')
+    os.makedirs('outputs/'+ args.temp_dir, exist_ok=True)
+    pickle_path = os.path.join('outputs', args.temp_dir, 'model_results.pkl')
+    
+    # Save parameters to text file
+    params_txt_path = save_model_parameters_to_txt(params, args.temp_dir)
+    print(f"  Parameters saved to {params_txt_path}")
     
     results_data = {
         'params': params,

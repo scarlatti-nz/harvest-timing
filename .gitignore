@@ -211,3 +211,4 @@ design/
 plots/
 reward_matrix.csv
 *.pkl
+outputs/
