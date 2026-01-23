@@ -58,6 +58,14 @@ def run_scenarios(grid_size=9):
                 'pc_rho': 0.96,
                 'pc_sigma': 0.2
             }
+        },
+        {
+            'name': 'stock-change-bank-credit',
+            'overrides': {
+                'switch_cost': 1e9,
+                'harvest_penalty_per_m3': 10000.0,
+                'carbon_credit_max_age': 10, # Bank credits beyond age 10 to surrender at harvest - functionally no carbon revenue
+            }
         }
     ]
 

@@ -139,7 +139,7 @@ def main():
     with open(args.pickle_path, 'rb') as f:
         results = pickle.load(f)
         
-    regime_names = {0: 'Averaging', 1: 'Permanent', 2: 'Pre-2023 Stock-Change'}
+    regime_names = {0: 'averaging', 1: 'permanent', 2: 'pre-2023 stock-change'}
     regime_name = regime_names[args.regime]
     
     # Run simulation
@@ -151,9 +151,9 @@ def main():
     # Chart 1: Harvest Volume
     plt.figure(figsize=(10, 6))
     plt.plot(sim_results['years'], np.array(sim_results['harvest_vol']) / 1e6, marker='o', color='forestgreen')
-    plt.title(f'Annual Harvest Volume - {regime_name} Regime', fontsize=14, fontweight='bold')
+    plt.title(f'Annual harvest volume - {regime_name} regime', fontsize=14, fontweight='bold')
     plt.xlabel('Year', fontsize=12)
-    plt.ylabel('Harvest Volume (Million m³)', fontsize=12)
+    plt.ylabel('Harvest volume (million m³)', fontsize=12)
     plt.grid(True, alpha=0.3)
     plt.xticks(sim_results['years'])
     
@@ -166,8 +166,8 @@ def main():
     
     # Subplot 1: Volume
     ax1.plot(sim_results['years'], np.array(sim_results['harvest_vol']) / 1e6, marker='o', color='forestgreen', label='Harvest Volume')
-    ax1.set_ylabel('Volume (Million m³)', fontsize=12)
-    ax1.set_title(f'Simulation Results - {regime_name} Regime', fontsize=14, fontweight='bold')
+    ax1.set_ylabel('Volume (million m³)', fontsize=12)
+    ax1.set_title(f'Simulation results - {regime_name} regime', fontsize=14, fontweight='bold')
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc='upper left')
     
@@ -178,8 +178,8 @@ def main():
     p1, = ax2_timber.plot(sim_results['years'], sim_results['timber_prices'], color='brown', label='Timber Price')
     p2, = ax2_carbon.plot(sim_results['years'], sim_results['carbon_prices'], color='blue', label='Carbon Price')
     
-    ax2_timber.set_ylabel('Timber Price ($/m³)', color='brown', fontsize=12)
-    ax2_carbon.set_ylabel('Carbon Price ($/tCO₂)', color='blue', fontsize=12)
+    ax2_timber.set_ylabel('Timber price ($/m³)', color='brown', fontsize=12)
+    ax2_carbon.set_ylabel('Carbon price ($/tCO₂)', color='blue', fontsize=12)
     ax2_timber.set_xlabel('Year', fontsize=12)
     ax2.grid(True, alpha=0.3)
     

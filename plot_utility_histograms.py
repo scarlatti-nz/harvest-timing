@@ -31,7 +31,7 @@ def build_reward_components(
     Build carbon and timber components matching build_reward_matrix logic.
     Returns two arrays of shape (N_states, N_ACTIONS).
     """
-    carbon_component = np.zeros((state_space.N_states, N_ACTIONS))
+    carbon_component = np.zeros((state_space.N_states, N_ACTIONS), dtype=np.float32)
     timber_component = np.zeros_like(carbon_component)
 
     pc_grid = price_data['pc_grid']
@@ -190,6 +190,17 @@ def run_simulations(
     return np.array(npvs), np.array(carbon_npvs), np.array(timber_npvs), np.array(harvest_ages), np.array(avg_carbon_prices), np.array(avg_timber_prices)
 
 def main():
+    # Set global font sizes for all plots
+    plt.rcParams.update({
+        'font.size': 20,
+        'axes.titlesize': 20,
+        'axes.labelsize': 20,
+        'xtick.labelsize': 18,
+        'ytick.labelsize': 18,
+        'legend.fontsize': 20,
+        'figure.titlesize': 28
+    })
+
     parser = argparse.ArgumentParser(description="Generate histograms of simulated utilities")
     parser.add_argument('--rerun', action='store_true', help='Force rerun of simulations even if cached CSVs exist')
     args = parser.parse_args()
@@ -197,7 +208,7 @@ def main():
     scenarios = [
         {
             'name': 'Averaging',
-            'dir': '1-to-50',
+            'dir': 'baseline',
             'regime': 0,
             'rotation': 1,
             'color': '#3498db',
@@ -205,7 +216,7 @@ def main():
             'color_timber': '#2980b9'
         },
         # {
-        #     'name': 'Averaging (Force harvest at age 28)',
+        #     'name': 'Averaging (force harvest at age 28)',
         #     'dir': 'averaging-no-switch',
         #     'regime': 0,
         #     'rotation': 1,
@@ -216,8 +227,8 @@ def main():
         #     'linestyle': '--'
         # },
         {
-            'name': 'Permanent (No Harvest)',
-            'dir': '1-to-50',
+            'name': 'Permanent',
+            'dir': 'baseline',
             'regime': 1,
             'rotation': 1,
             'color': '#e67e22',
@@ -225,8 +236,8 @@ def main():
             'color_timber': '#f39c12'
         },
         {
-            'name': 'Pre-2023 Stock Change',
-            'dir': '1-to-50',
+            'name': 'Stock change',
+            'dir': 'baseline',
             'regime': 2,
             'rotation': 1,
             'color': '#8e44ad',
@@ -234,23 +245,58 @@ def main():
             'color_timber': '#8e44ad'
         },
 
+        # {
+        #     'name': 'Stock change (force harvest at age 28)',
+        #     'dir': 'baseline',
+        #     'regime': 2,
+        #     'rotation': 1,
+        #     'color': '#27ae60',
+        #     'color_carbon': '#16a085',
+        #     'color_timber': '#2980b9',
+        #     'force_age': 28,
+        #     'linestyle': '--'
+        # }
+    ]
+
+    # SECOND SET OF SCENARIOS COMPARING AVERAGING WITH SUBOPTIMAL STOCK CHANGE
+    scenarios_suboptimal = [
         {
-            'name': 'Stock Change (Force harvest at age 28)',
-            'dir': '1-to-50',
+            'name': 'Averaging',
+            'dir': 'baseline',
+            'regime': 0,
+            'rotation': 1,
+            'color': '#3498db',
+            'color_carbon': '#16a085',
+            'color_timber': '#2980b9'
+        },
+        {
+            'name': 'Stock change (force harvest at age 28)',
+            'dir': 'baseline',
             'regime': 2,
             'rotation': 1,
             'color': '#27ae60',
             'color_carbon': '#16a085',
             'color_timber': '#2980b9',
             'force_age': 28,
-            'linestyle': '--'
+        },
+        {
+            'name': 'Stock change (bank credits)',
+            'dir': 'stock-change-bank-credit',
+            'regime': 0,
+            'rotation': 1,
+            'color': '#633a01',
+            'color_carbon': '#16a085',
+            'color_timber': '#2980b9',
         }
     ]
+
+    # UNCOMMENT HERE TO RUN THE SUBOPTIMAL SCENARIOS
+    scenarios = scenarios_suboptimal
 
     results_storage = []
     
     # Simulation settings
-    N_SIMS = 1000
+    N_SIMS = 5000
     N_YEARS = 50 
 
     for sc in scenarios:
@@ -321,7 +367,7 @@ def main():
         price_quality_factor = compute_price_quality_factor(params)
         
         R = build_reward_matrix(params, state_space, price_data, V_age, C_age, DeltaC_avg, DeltaC_perm, price_quality_factor)
-        Q = build_transition_matrix(params, state_space, price_data)
+        Q_sa, _, _ = build_transition_matrix(params, state_space, price_data)
         reward_components = build_reward_components(params, state_space, price_data, V_age, C_age, DeltaC_avg, DeltaC_perm, price_quality_factor)
         
         npvs, carbon_npvs, timber_npvs, harvest_ages, avg_pc, avg_pt = run_simulations(
@@ -331,7 +377,7 @@ def main():
             params=params,
             state_space=state_space,
             price_data=price_data,
-            R=R, Q=Q, V=V, sigma=sigma, C_age=C_age,
+            R=R, Q=Q_sa, V=V, sigma=sigma, C_age=C_age,
             reward_components=reward_components,
             n_years=N_YEARS
         )
@@ -377,7 +423,7 @@ def main():
         n_cols = 2
         n_rows = int(np.ceil(len(results_storage)/2))
     
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(10, 5 * n_rows), sharex=True)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(24, 5 * n_rows), sharex=False)
     if isinstance(axes, np.ndarray):
         axes = axes.flatten()
     else:
@@ -386,7 +432,7 @@ def main():
     # Determine common bins
     all_npvs = np.concatenate([r['npvs'] for r in results_storage])
     min_val = np.min(all_npvs)
-    max_val = np.max(all_npvs)
+    max_val = 80000 # Cap at 80,000 as requested
     bins = np.linspace(min_val, max_val, 50)
     
     for i, res in enumerate(results_storage):
@@ -397,14 +443,17 @@ def main():
         ax.hist(npvs, bins=bins, color=sc['color'], alpha=0.7, edgecolor='black')
         ax.axvline(np.mean(npvs), color='red', linestyle='dashed', linewidth=2, 
                   label=f'Mean: ${np.mean(npvs):,.0f}')
-        ax.set_title(f'{sc["name"]}', fontsize=14, fontweight='bold')
-        ax.set_ylabel('Frequency', fontsize=12)
+        ax.set_title(f'{sc["name"]}', fontweight='bold')
+        ax.set_ylabel('Frequency')
+        ax.set_xlim(left=min_val, right=80000)
         ax.legend()
         ax.grid(True, alpha=0.3)
         
-    axes[-1].set_xlabel('Net Present Value ($/ha)', fontsize=12)
+    for ax in axes:
+        ax.set_xlabel('Net present value ($/ha)')
     
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.suptitle("Distribution of NPV at planting under optimal decision-making (n=5000)", y=0.98, fontweight='bold')
     output_path = 'plots/utility_histograms.png'
     os.makedirs('plots', exist_ok=True)
     plt.savefig(output_path, dpi=150)
@@ -412,18 +461,19 @@ def main():
 
     # 1b. CDF of NPVs (All scenarios on one plot)
     print("Generating CDF plot...")
-    plt.figure(figsize=(10, 7))
+    plt.figure(figsize=(16, 9))
     for res in results_storage:
         sc = res['scenario']
         npvs = np.sort(res['npvs'])
         cdf = np.arange(1, len(npvs) + 1) / len(npvs)
         ls = sc.get('linestyle', '-')
-        plt.plot(npvs, cdf, label=sc['name'], color=sc['color'], linewidth=2.5, linestyle=ls)
+        plt.plot(npvs, cdf, label=sc['name'], color=sc['color'], linewidth=3, linestyle=ls)
     
-    plt.title('Cumulative Distribution of Realized Utilities (NPV)', fontsize=14, fontweight='bold')
-    plt.xlabel('Net Present Value ($/ha)', fontsize=12)
-    plt.ylabel('Cumulative Probability', fontsize=12)
-    plt.legend(fontsize=11)
+    plt.title('Cumulative distribution of realized utilities (NPV)', fontweight='bold')
+    plt.xlabel('Net present value ($/ha)')
+    plt.ylabel('Cumulative probability')
+    plt.xlim(-20000, 60000)
+    plt.legend()
     plt.grid(True, alpha=0.3)
     
     output_path_cdf = 'plots/utility_cdf.png'
@@ -441,7 +491,7 @@ def main():
 
     def plot_components(ax, carbon_vals, timber_vals, title, color_carbon, color_timber):
         combined_min = min(np.min(carbon_vals), np.min(timber_vals))
-        combined_max = max(np.max(carbon_vals), np.max(timber_vals))
+        combined_max = 80000 # Cap at 80,000 as requested
         bins = np.linspace(combined_min, combined_max, 50)
 
         ax.hist(timber_vals, bins=bins, color=color_timber, alpha=0.6, edgecolor='black', label='Timber utility')
@@ -450,8 +500,9 @@ def main():
         ax.hist(carbon_vals, bins=bins, color=color_carbon, alpha=0.6, edgecolor='black', label='Carbon utility')
         ax.axvline(np.mean(carbon_vals), color=color_carbon, linestyle='dashed', linewidth=2, label=f'Carbon mean: ${np.mean(carbon_vals):,.0f}')
 
-        ax.set_title(title, fontsize=14, fontweight='bold')
-        ax.set_ylabel('Frequency', fontsize=12)
+        ax.set_title(title, fontweight='bold')
+        ax.set_ylabel('Frequency')
+        ax.set_xlim(left=combined_min, right=80000)
         ax.legend()
         ax.grid(True, alpha=0.3)
 
@@ -463,7 +514,8 @@ def main():
             color_carbon=sc['color_carbon'], color_timber=sc['color_timber']
         )
     
-    axes2[-1].set_xlabel('Net Present Value ($/ha)', fontsize=12)
+    for ax in axes2:
+        ax.set_xlabel('Net present value ($/ha)')
 
     plt.tight_layout()
     output_path_components = 'plots/utility_histograms_components.png'
@@ -472,7 +524,18 @@ def main():
 
     # 3. Age at First Harvest
     print("Generating harvest age plot...")
-    fig3, axes3 = plt.subplots(n_rows, n_cols, figsize=(10, 5 * n_rows), sharex=True)
+    # Filter out Permanent scenario for harvest age plots as requested
+    harvest_results = [res for res in results_storage if res['scenario']['name'] != 'Permanent']
+    n_harvest_plots = len(harvest_results)
+
+    if n_harvest_plots <= 4:
+        n_cols_h = 1
+        n_rows_h = n_harvest_plots
+    else:
+        n_cols_h = 2
+        n_rows_h = int(np.ceil(n_harvest_plots / 2))
+
+    fig3, axes3 = plt.subplots(n_rows_h, n_cols_h, figsize=(16, 5 * n_rows_h), sharex=False)
     if isinstance(axes3, np.ndarray):
         axes3 = axes3.flatten()
     else:
@@ -480,16 +543,16 @@ def main():
 
     # Determine common bins for ages
     # Filter out NaNs for bin calculation
-    all_ages = np.concatenate([r['harvest_ages'][~np.isnan(r['harvest_ages'])] for r in results_storage])
+    all_ages = np.concatenate([r['harvest_ages'][~np.isnan(r['harvest_ages'])] for r in harvest_results])
     if len(all_ages) > 0:
         min_age = np.min(all_ages)
         max_age = np.max(all_ages)
         # Use integer bins for ages
-        age_bins = np.arange(min_age, max_age + 2) - 0.5
+        age_bins = np.arange(min(0, min_age), max_age + 2) - 0.5
     else:
         age_bins = 20
 
-    for i, res in enumerate(results_storage):
+    for i, res in enumerate(harvest_results):
         sc = res['scenario']
         ages = res['harvest_ages']
         # Remove NaNs for plotting
@@ -506,14 +569,17 @@ def main():
         if n_no_harvest > 0:
             title += f' ({n_no_harvest}/{len(ages)} never harvested)'
             
-        ax.set_title(title, fontsize=14, fontweight='bold')
-        ax.set_ylabel('Frequency', fontsize=12)
+        ax.set_title(title, fontweight='bold')
+        ax.set_ylabel('Frequency')
+        ax.set_xlim(left=0)
         ax.legend()
         ax.grid(True, alpha=0.3)
         
-    axes3[-1].set_xlabel('Age at First Harvest (years)', fontsize=12)
+    for ax in axes3:
+        ax.set_xlabel('Age at first harvest (years)')
 
-    plt.tight_layout()
+    fig3.suptitle("Distribution of harvest age under optimal decision-making (n=5000)", y=0.98)
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
     output_path_ages = 'plots/harvest_age_histograms.png'
     plt.savefig(output_path_ages, dpi=150)
     print(f"Harvest age plot saved to {output_path_ages}")

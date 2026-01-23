@@ -168,8 +168,8 @@ def run_sanity_checks(base_params: Optional[ModelParameters] = None):
     print(f"\n  State space size: {state_space.N_states}")
     
     R = build_reward_matrix(params_det, state_space, price_data, V_age, C_age, DeltaC_avg, DeltaC_perm, price_quality_factor)
-    Q = build_transition_matrix(params_det, state_space, price_data)
-    V, sigma = solve_model(R, Q, params_det.beta)
+    Q_sa, s_indices, a_indices = build_transition_matrix(params_det, state_space, price_data)
+    V, sigma = solve_model(R, Q_sa, params_det.beta, method='policy_iteration', s_indices=s_indices, a_indices=a_indices)
     
     _print_scenario_details(
         "Baseline", params_det, price_data, C_age, V_age, DeltaC_avg,
@@ -211,7 +211,7 @@ def run_sanity_checks(base_params: Optional[ModelParameters] = None):
     
     DeltaC_zero = np.zeros_like(DeltaC_avg)
     R_no_carbon = build_reward_matrix(params_det, state_space, price_data, V_age, C_age, DeltaC_zero, DeltaC_zero, price_quality_factor)
-    V_nc, sigma_nc = solve_model(R_no_carbon, Q, params_det.beta)
+    V_nc, sigma_nc = solve_model(R_no_carbon, Q_sa, params_det.beta, method='policy_iteration', s_indices=s_indices, a_indices=a_indices)
     
     _print_scenario_details(
         "No Carbon", params_det, price_data, C_age, V_age, DeltaC_zero,
@@ -236,8 +236,8 @@ def run_sanity_checks(base_params: Optional[ModelParameters] = None):
     state_space_p = build_state_space(params_penalty)
     
     R_p = build_reward_matrix(params_penalty, state_space_p, price_data_p, V_age_p, C_age_p, DeltaC_avg_p, DeltaC_perm_p, price_quality_factor_p)
-    Q_p = build_transition_matrix(params_penalty, state_space_p, price_data_p)
-    V_p, sigma_p = solve_model(R_p, Q_p, params_penalty.beta)
+    Q_sa_p, s_indices_p, a_indices_p = build_transition_matrix(params_penalty, state_space_p, price_data_p)
+    V_p, sigma_p = solve_model(R_p, Q_sa_p, params_penalty.beta, method='policy_iteration', s_indices=s_indices_p, a_indices=a_indices_p)
     
     _print_scenario_details(
         "With Penalty", params_penalty, price_data_p, C_age_p, V_age_p, DeltaC_avg_p,

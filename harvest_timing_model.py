@@ -54,7 +54,7 @@ class ModelParameters:
     # Timber price
     pt_mean: float = 150.0     # Mean timber price ($/m³)
     pt_rho: float = 0.63       # AR(1) persistence
-    pt_sigma: float = 0.05     # Volatility of log price
+    pt_sigma: float = 0.15     # Volatility of log price
     
     # Cost parameters
     harvest_cost_per_m3: float = 46.0   # $/m³
@@ -446,7 +446,7 @@ def build_reward_matrix(
     Returns:
         R: Array of shape (N_states, N_actions)
     """
-    R = np.zeros((state_space.N_states, N_ACTIONS))
+    R = np.zeros((state_space.N_states, N_ACTIONS), dtype=np.float32)
     
     pc_grid = price_data['pc_grid']
     pt_grid = price_data['pt_grid']
@@ -593,25 +593,58 @@ def build_transition_matrix(
     params: ModelParameters,
     state_space: StateSpace,
     price_data: Dict
-) -> np.ndarray:
+) -> Tuple["sp.csr_matrix", np.ndarray, np.ndarray]:
     """
-    Construct transition tensor Q[action, state, next_state].
+    Construct sparse transition matrix in state-action-pairs form for QuantEcon.
     
     No forced harvest - age just increments (capped at A_max for state space).
     
     Returns:
-        Q: Array of shape (N_actions, N_states, N_states)
+        Q_sa: Sparse CSR matrix of shape (L, N_states) where L = N_states * N_ACTIONS
+        s_indices: Array of shape (L,) giving the state index for each SA row
+        a_indices: Array of shape (L,) giving the action index for each SA row
     """
-    Q = np.zeros((N_ACTIONS, state_space.N_states, state_space.N_states))
+    import scipy.sparse as sp
+
+    n = state_space.N_states
+    m = N_ACTIONS
+    L = n * m
     
     Pc = price_data['Pc']
     Pt = price_data['Pt']
+
+    # Enumerate all state-action pairs (product formulation) as SA pairs
+    s_indices = np.repeat(np.arange(n, dtype=np.int32), m)
+    a_indices = np.tile(np.arange(m, dtype=np.int8), n)
+
+    # Each (state, action) row has exactly N_pc * N_pt non-zeros (independent price transitions)
+    nnz_per_row = params.N_pc * params.N_pt
+    nnz = L * nnz_per_row
+    rows = np.empty(nnz, dtype=np.int32)
+    cols = np.empty(nnz, dtype=np.int32)
+    data = np.empty(nnz, dtype=np.float32)
+
+    # Fast arithmetic mapping consistent with build_state_space enumeration order:
+    # for a in ages:
+    #   for i_pc:
+    #     for i_pt:
+    #       for regime:
+    #         for rotation in {1,2}:
+    #           s += 1
+    def _state_index(a: int, i_pc: int, i_pt: int, regime: int, rotation: int) -> int:
+        return (
+            (((a * params.N_pc + i_pc) * params.N_pt + i_pt) * params.N_regimes + regime)
+            * params.N_rotations
+            + (rotation - 1)
+        )
     
-    for s in range(state_space.N_states):
+    k = 0
+    for s in range(n):
         a, i_pc, i_pt, regime, rotation = state_space.state_to_tuple[s]
         
         # Compute next state components for each action
-        for action in range(N_ACTIONS):
+        for action in range(m):
+            row = s * m + action
             
             if action == ACTION_DO_NOTHING:
                 # Age advances (capped at A_max for state space bounds)
@@ -643,22 +676,27 @@ def build_transition_matrix(
                     # Joint price transition probability (independent)
                     p_price = Pc[i_pc, j_pc] * Pt[i_pt, j_pt]
                     
-                    # Get next state index
-                    next_tuple = (a_next, j_pc, j_pt, regime_next, rotation_next)
-                    s_next = state_space.tuple_to_state[next_tuple]
-                    
-                    Q[action, s, s_next] += p_price
-    
-    # Verify rows sum to 1
-    row_sums = Q.sum(axis=2)
-    if not np.allclose(row_sums, 1.0):
-        warnings.warn("Transition matrix rows don't sum to 1. Normalizing.")
-        for action in range(N_ACTIONS):
-            for s in range(state_space.N_states):
-                if row_sums[action, s] > 0:
-                    Q[action, s, :] /= row_sums[action, s]
-    
-    return Q
+                    # Get next state index (fast arithmetic mapping)
+                    s_next = _state_index(a_next, j_pc, j_pt, regime_next, rotation_next)
+
+                    rows[k] = row
+                    cols[k] = s_next
+                    data[k] = p_price
+                    k += 1
+
+    if k != nnz:
+        raise RuntimeError(f"Internal error building sparse Q: expected nnz={nnz}, got k={k}")
+
+    Q_sa = sp.csr_matrix((data, (rows, cols)), shape=(L, n), dtype=np.float32)
+
+    # Quick validation: each row should sum to 1 (within float tolerance)
+    row_sums = np.asarray(Q_sa.sum(axis=1)).ravel()
+    if not np.allclose(row_sums, 1.0, atol=1e-5, rtol=1e-5):
+        warnings.warn("Sparse transition matrix rows don't sum to 1. Normalizing.")
+        inv = np.reciprocal(np.maximum(row_sums, 1e-12)).astype(np.float32)
+        Q_sa = sp.diags(inv, offsets=0, format="csr") @ Q_sa
+
+    return Q_sa, s_indices, a_indices
 
 
 # =============================================================================
@@ -667,9 +705,11 @@ def build_transition_matrix(
 
 def solve_model(
     R: np.ndarray,
-    Q: np.ndarray,
+    Q,
     beta: float,
-    method: str = 'policy_iteration'
+    method: str = 'policy_iteration',
+    s_indices: Optional[np.ndarray] = None,
+    a_indices: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Solve using QuantEcon's DiscreteDP (infinite horizon).
@@ -678,16 +718,23 @@ def solve_model(
         V: Value function
         sigma: Optimal policy
     """
-    # DiscreteDP expects Q in shape (N_states, N_actions, N_states)
-    # We have (N_actions, N_states, N_states), so transpose
-    Q_transposed = np.transpose(Q, (1, 0, 2))
-    
-    ddp = DiscreteDP(R, Q_transposed, beta)
-    
-    if method == 'value_iteration':
-        results = ddp.solve(method='policy_iteration')
+    # Use sparse state-action-pairs formulation if indices are provided.
+    # This avoids allocating the dense (n, m, n) transition tensor.
+    if s_indices is not None and a_indices is not None:
+        # Convert (n, m) reward matrix to SA reward vector in the same ordering:
+        # row = s * N_ACTIONS + a
+        R_sa = np.asarray(R, dtype=np.float32).reshape(-1)
+        ddp = DiscreteDP(R_sa, Q, beta, s_indices, a_indices)
     else:
+        # Dense product formulation (only feasible for small problems)
+        Q_transposed = np.transpose(Q, (1, 0, 2))
+        ddp = DiscreteDP(R, Q_transposed, beta)
+
+    # Respect requested method
+    if method in ('value_iteration', 'vi'):
         results = ddp.solve(method='value_iteration')
+    else:
+        results = ddp.solve(method='policy_iteration')
     
     return results.v, results.sigma
 
@@ -822,7 +869,7 @@ def simulate_single_trajectory(
     state_space: StateSpace,
     price_data: Dict,
     R: np.ndarray,
-    Q: np.ndarray,
+    Q,
     V: np.ndarray,
     sigma: np.ndarray,
     C_age: np.ndarray,
@@ -893,15 +940,8 @@ def simulate_single_trajectory(
     current_rotation = initial_rotation
     
     # Pre-compute expected continuation values vector E[V(s')] = sum_s' P(s'|s,a) V(s')
-    # Since Q is (N_actions, N_states, N_states), we can do matrix-vector multiplication
-    # But Q is sparse-ish, so let's just do it per step to avoid memory blowup if Q is dense
-    # Actually, Q is passed in, so we can use it directly.
-    # EV[a, s] = sum_{s'} Q[a, s, s'] * V[s']
-    # We can compute this row by row for the current state.
-    
-    # Transpose Q back to (N_actions, N_states, N_states) if needed?
-    # build_transition_matrix returns (N_ACTIONS, N_states, N_states)
-    # So Q[action, s, :] is the distribution over next states
+    # If Q is sparse SA-form (L x N_states), expected continuation is:
+    #   expected_v = Q_sa[row] @ V, where row = s * N_ACTIONS + a.
     
     for t in range(n_years + 1):
         # Record state
@@ -926,11 +966,18 @@ def simulate_single_trajectory(
             r_sa = R[s, a]
             
             # Expected continuation value
-            # We can use Q matrix: expected_v = Q[a, s, :] @ V
-            # This might be slow if Q is huge and not sparse.
-            # However, given the structure, we know exactly which states are reachable.
-            # Let's use the Q matrix row if available, assuming it's efficient enough.
-            expected_v = np.dot(Q[a, s, :], V)
+            expected_v = None
+            try:
+                import scipy.sparse as sp
+                if sp.issparse(Q):
+                    row = s * N_ACTIONS + a
+                    expected_v = float(Q[row].dot(V))
+            except Exception:
+                expected_v = None
+
+            if expected_v is None:
+                # Fallback for dense Q[action, s, :]
+                expected_v = float(np.dot(Q[a, s, :], V))
             
             q_values[a] = r_sa + params.beta * expected_v
         
@@ -1146,13 +1193,13 @@ def main(args=None, params=None):
     
     # Build transition matrix
     print("\n--- Building Transition Matrix ---")
-    Q = build_transition_matrix(params, state_space, price_data)
-    print(f"  Shape: {Q.shape}")
+    Q_sa, s_indices, a_indices = build_transition_matrix(params, state_space, price_data)
+    print(f"  Shape (SA-form): {Q_sa.shape}")
     
     # Solve
     print("\n--- Solving DP (Infinite Horizon) ---")
     start_time = time.time()
-    V, sigma = solve_model(R, Q, params.beta)
+    V, sigma = solve_model(R, Q_sa, params.beta, method='policy_iteration', s_indices=s_indices, a_indices=a_indices)
     end_time = time.time()
     print(f"  Time taken: {end_time - start_time:.2f} seconds")
     print("  ✓ Solution found")
@@ -1168,7 +1215,7 @@ def main(args=None, params=None):
     # Simulate single trajectory (analysis)
     print("\n--- Simulating Optimal Trajectory ---")
     sim_data = simulate_single_trajectory(
-        params, state_space, price_data, R, Q, V, sigma, C_age,
+        params, state_space, price_data, R, Q_sa, V, sigma, C_age,
         n_years=50, seed=42
     )
 
