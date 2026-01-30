@@ -16,6 +16,67 @@ from harvest_timing_model import (
     ACTION_DO_NOTHING, ACTION_HARVEST_REPLANT, ACTION_SWITCH_PERMANENT, N_ACTIONS
 )
 
+SCENARIOS_BASELINE = [
+    {
+        'name': 'Averaging',
+        'dir': 'baseline',
+        'regime': 0,
+        'rotation': 1,
+        'color': '#3498db',
+        'color_carbon': '#16a085',
+        'color_timber': '#2980b9'
+    },
+    {
+        'name': 'Permanent',
+        'dir': 'baseline',
+        'regime': 1,
+        'rotation': 1,
+        'color': '#e67e22',
+        'color_carbon': '#d35400',
+        'color_timber': '#f39c12'
+    },
+    {
+        'name': 'Stock change',
+        'dir': 'baseline',
+        'regime': 2,
+        'rotation': 1,
+        'color': '#8e44ad',
+        'color_carbon': '#27ae60',
+        'color_timber': '#8e44ad'
+    },
+]
+
+SCENARIOS_SUBOPTIMAL = [
+    {
+        'name': 'Averaging',
+        'dir': 'baseline',
+        'regime': 0,
+        'rotation': 1,
+        'color': '#3498db',
+        'color_carbon': '#16a085',
+        'color_timber': '#2980b9'
+    },
+    {
+        'name': 'Stock change (force harvest at age 28)',
+        'dir': 'baseline',
+        'regime': 2,
+        'rotation': 1,
+        'color': '#27ae60',
+        'color_carbon': '#16a085',
+        'color_timber': '#2980b9',
+        'force_age': 28,
+    },
+    {
+        'name': 'Stock change (bank credits)',
+        'dir': 'stock-change-bank-credit',
+        'regime': 0,
+        'rotation': 1,
+        'color': '#633a01',
+        'color_carbon': '#16a085',
+        'color_timber': '#2980b9',
+    }
+]
+
 
 def build_reward_components(
     params: ModelParameters,
@@ -203,95 +264,15 @@ def main():
 
     parser = argparse.ArgumentParser(description="Generate histograms of simulated utilities")
     parser.add_argument('--rerun', action='store_true', help='Force rerun of simulations even if cached CSVs exist')
+    parser.add_argument(
+        '--scenario-set',
+        choices=['baseline', 'suboptimal'],
+        default='baseline',
+        help='Which scenario bundle to run'
+    )
     args = parser.parse_args()
 
-    scenarios = [
-        {
-            'name': 'Averaging',
-            'dir': 'baseline',
-            'regime': 0,
-            'rotation': 1,
-            'color': '#3498db',
-            'color_carbon': '#16a085',
-            'color_timber': '#2980b9'
-        },
-        # {
-        #     'name': 'Averaging (force harvest at age 28)',
-        #     'dir': 'averaging-no-switch',
-        #     'regime': 0,
-        #     'rotation': 1,
-        #     'color': '#3498db',
-        #     'color_carbon': '#16a085',
-        #     'color_timber': '#2980b9',
-        #     'force_age': 28,
-        #     'linestyle': '--'
-        # },
-        {
-            'name': 'Permanent',
-            'dir': 'baseline',
-            'regime': 1,
-            'rotation': 1,
-            'color': '#e67e22',
-            'color_carbon': '#d35400',
-            'color_timber': '#f39c12'
-        },
-        {
-            'name': 'Stock change',
-            'dir': 'baseline',
-            'regime': 2,
-            'rotation': 1,
-            'color': '#8e44ad',
-            'color_carbon': '#27ae60',
-            'color_timber': '#8e44ad'
-        },
-
-        # {
-        #     'name': 'Stock change (force harvest at age 28)',
-        #     'dir': 'baseline',
-        #     'regime': 2,
-        #     'rotation': 1,
-        #     'color': '#27ae60',
-        #     'color_carbon': '#16a085',
-        #     'color_timber': '#2980b9',
-        #     'force_age': 28,
-        #     'linestyle': '--'
-        # }
-    ]
-
-    # SECOND SET OF SCENARIOS COMPARING AVERAGING WITH SUBOPTIMAL STOCK CHANGE
-    scenarios_suboptimal = [
-        {
-            'name': 'Averaging',
-            'dir': 'baseline',
-            'regime': 0,
-            'rotation': 1,
-            'color': '#3498db',
-            'color_carbon': '#16a085',
-            'color_timber': '#2980b9'
-        },
-        {
-            'name': 'Stock change (force harvest at age 28)',
-            'dir': 'baseline',
-            'regime': 2,
-            'rotation': 1,
-            'color': '#27ae60',
-            'color_carbon': '#16a085',
-            'color_timber': '#2980b9',
-            'force_age': 28,
-        },
-        {
-            'name': 'Stock change (bank credits)',
-            'dir': 'stock-change-bank-credit',
-            'regime': 0,
-            'rotation': 1,
-            'color': '#633a01',
-            'color_carbon': '#16a085',
-            'color_timber': '#2980b9',
-        }
-    ]
-
-    # UNCOMMENT HERE TO RUN THE SUBOPTIMAL SCENARIOS
-    scenarios = scenarios_suboptimal
+    scenarios = SCENARIOS_SUBOPTIMAL if args.scenario_set == 'suboptimal' else SCENARIOS_BASELINE
 
     results_storage = []
     
@@ -472,7 +453,7 @@ def main():
     plt.title('Cumulative distribution of realized utilities (NPV)', fontweight='bold')
     plt.xlabel('Net present value ($/ha)')
     plt.ylabel('Cumulative probability')
-    plt.xlim(-20000, 60000)
+    plt.xlim(0, 80000)
     plt.legend()
     plt.grid(True, alpha=0.3)
     
@@ -578,7 +559,7 @@ def main():
     for ax in axes3:
         ax.set_xlabel('Age at first harvest (years)')
 
-    fig3.suptitle("Distribution of harvest age under optimal decision-making (n=5000)", y=0.98)
+    fig3.suptitle("Distribution of harvest age under optimal decision-making (n=5000)", y=0.98, fontweight='bold')
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     output_path_ages = 'plots/harvest_age_histograms.png'
     plt.savefig(output_path_ages, dpi=150)
@@ -586,5 +567,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

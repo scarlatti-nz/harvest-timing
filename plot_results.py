@@ -576,7 +576,7 @@ def plot_trajectory_conference(
     ax.plot(years, data['timber_price'], color='#27ae60', linewidth=2.5, 
             label='Timber Price ($/m³)')
     
-    ax.set_ylabel('Price', fontsize=18, fontweight='bold')
+    ax.set_ylabel('Price', fontsize=18)
     ax.set_title(f'Simulated price trajectories', fontsize=22, fontweight='bold', pad=10)
     ax.legend(loc='upper right', fontsize=16, framealpha=0.9)
     ax.grid(True, alpha=0.3, linewidth=0.5)
@@ -612,7 +612,7 @@ def plot_trajectory_conference(
                        bbox=dict(boxstyle='round,pad=0.3', facecolor='white', 
                                 edgecolor='#e74c3c', alpha=0.9))
     
-    ax.set_ylabel('Total utility ($/ha)', fontsize=18, fontweight='bold')
+    ax.set_ylabel('Total utility ($/ha)', fontsize=18)
     ax.set_xlabel('Forest age', fontsize=18, fontweight='bold')
     ax.set_title(f'Option utilities: {regime_label}', fontsize=22, fontweight='bold', pad=10)
     ax.legend(loc='upper right', fontsize=16, framealpha=0.9)
@@ -866,7 +866,7 @@ def plot_accounting_comparison(
     
     # Annotation text
     ax.text(harvest_age + 0.5, 800, 
-            'Assumed Harvest Age 28\n(Stock Change & Averaging)',
+            'Assumed harvest at age 28\n(Stock change & averaging)',
             fontsize=12, fontweight='bold', verticalalignment='top')
     
     # Labels and titles
@@ -888,6 +888,81 @@ def plot_accounting_comparison(
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         plt.savefig(save_path, dpi=200, bbox_inches='tight')
         print(f"  Accounting comparison plot saved to: {save_path}")
+    
+    plt.close(fig)
+
+
+def macro_impact(
+    delta_npv_sc_opt: float,
+    delta_npv_sc_28: float,
+    delta_npv_sc_bank: float,
+    new_planting_ha_per_year: float,
+    save_path: Optional[str] = None
+):
+    """
+    Plot bar chart of national impact of regime choice relative to averaging.
+    """
+    avg_value_per_ha = 27977
+    
+    scenarios = [
+        "Stock change\n(bank credits)",
+        "Stock change\n(age 28 harvest)",
+        "Stock change\n(optimal harvest)"
+    ]
+    per_ha_values = [delta_npv_sc_bank, delta_npv_sc_28, delta_npv_sc_opt]
+    impacts = [v * new_planting_ha_per_year for v in per_ha_values]
+    colors = ['#633a01', '#27ae60', '#8e44ad']
+
+    fig, ax = plt.subplots(figsize=(12, 7))
+
+    bars = ax.bar(scenarios, impacts, color=colors, edgecolor='black', alpha=0.8)
+
+    # Add labels on top of bars
+    for i, bar in enumerate(bars):
+        height = bar.get_height()
+        per_ha = per_ha_values[i]
+        pct = (per_ha / avg_value_per_ha) * 100
+        
+        # Total impact label (e.g., $100.5M)
+        total_label = f'${height/1e6:.1f}M' if abs(height) >= 1e6 else f'${height:,.0f}'
+        # Percentage label (e.g., +5.2%)
+        pct_label = f'({pct:+.1f}%)'
+        
+        full_label = f'{total_label}\n{pct_label}'
+        
+        # Position inside the bar
+        va = 'top' if height >= 0 else 'bottom'
+        offset = -8 if height >= 0 else 8
+        
+        ax.annotate(full_label,
+                    xy=(bar.get_x() + bar.get_width() / 2, height),
+                    xytext=(0, offset),
+                    textcoords="offset points",
+                    ha='center', va=va, fontweight='bold', fontsize=12,
+                    color='white')
+
+    ax.axhline(0, color='black', linewidth=0.8, alpha=0.5)
+    
+    ax.set_title("National impact of regime choice for annual new planting", 
+                 fontsize=18, fontweight='bold', pad=20)
+    ax.set_ylabel("Change in PV at establishment relative to averaging ($)", 
+                  fontsize=14, fontweight='bold')
+    
+    # Tick adjustments
+    ax.tick_params(axis='both', labelsize=12)
+    
+    # Grid
+    ax.grid(True, axis='y', alpha=0.3)
+    
+    # Format y-axis with commas
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
+
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"  Macro impact plot saved to: {save_path}")
     
     plt.close(fig)
 
@@ -942,8 +1017,8 @@ def plot_value_function(
 
 def main():
     parser = argparse.ArgumentParser(description="Generate plots for Harvest Timing Model")
-    parser.add_argument('--temp-dir', type=str, default='temp',
-                        help='Directory containing the pickle file (default: temp)')
+    parser.add_argument('--temp-dir', type=str, default='baseline',
+                        help='Directory containing the pickle file (default: baseline)')
     parser.add_argument('--pickle-path', type=str, default=None,
                         help='Full path to the pickle file (overrides --temp-dir)')
     parser.add_argument('--output-dir', type=str, default='plots',
@@ -1059,12 +1134,12 @@ def main():
     )
     plot_trajectory_conference(
         sim_data_averaging, params,
-        regime_label='Averaging Accounting',
+        regime_label='averaging accounting',
         save_path=os.path.join(args.output_dir, 'conference_averaging.png')
     )
     plot_trajectory_revenue_conference(
         sim_data_averaging, params,
-        regime_label='Averaging Accounting',
+        regime_label='averaging accounting',
         save_path=os.path.join(args.output_dir, 'conference_averaging_revenue.png')
     )
     
@@ -1091,6 +1166,14 @@ def main():
         save_path=os.path.join(args.output_dir, 'conference_stockchange_revenue.png')
     )
     
+    macro_impact(
+        delta_npv_sc_opt=5141,
+        delta_npv_sc_28=-2481,
+        delta_npv_sc_bank=-6653,
+        new_planting_ha_per_year=53400,
+        save_path='plots/macro_impact.png'
+    )
+
     print("\nAll plots generated successfully.")
 
 if __name__ == "__main__":

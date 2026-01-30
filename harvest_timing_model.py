@@ -61,11 +61,11 @@ class ModelParameters:
     harvest_cost_flat_per_ha: float = 12500.0  # Flat harvest cost per hectare
     replant_cost: float = 2000.0        # $ per hectare
     maintenance_cost: float = 50.0      # $ per year per hectare
-    switch_cost: float = 1e9            # hack to disable switching for utility comparison
-    # switch_cost: float = 10.0          # Admin cost to switch to permanent - $10/ha based on reality of per-forest fee of $700 and area of 70ha. Basically negligible.
+    # switch_cost: float = 1e9            # hack to disable switching for utility comparison
+    switch_cost: float = 10.0          # Admin cost to switch to permanent - $10/ha based on reality of per-forest fee of $700 and average area of 70ha. Basically negligible.
     
     # Optional harvest penalty ($/m³) - $10 reflects current legislated penalty but can set aribtrarily high to completely disallow harvest of permanent regime
-    harvest_penalty_per_m3: float = 10000.0
+    harvest_penalty_per_m3: float = 10.0
     
     # Permanent regime carbon liability parameters
     # On harvest: pay carbon_price * carbon_stock
@@ -1036,8 +1036,6 @@ def parse_args():
 Examples:
   python harvest_timing_model.py                    # Run full model
   python harvest_timing_model.py --sanity-checks    # Run only sanity checks
-  python harvest_timing_model.py --no-plots         # Run without generating plots
-  python harvest_timing_model.py --price-paths-only # Generate price paths and exit
   python harvest_timing_model.py --grid-size 20     # Use 20 price states for each price
         """
     )
@@ -1045,16 +1043,6 @@ Examples:
         '--sanity-checks', '-s',
         action='store_true',
         help='Run only sanity checks with detailed output'
-    )
-    parser.add_argument(
-        '--no-plots',
-        action='store_true',
-        help='Skip plot generation'
-    )
-    parser.add_argument(
-        '--price-paths-only',
-        action='store_true',
-        help='Generate price paths plot and exit'
     )
     parser.add_argument(
         '--grid-size',
@@ -1153,26 +1141,6 @@ def main(args=None, params=None):
     
     print(f"  Carbon price range: ${price_data['pc_grid'][0]:.0f} - ${price_data['pc_grid'][-1]:.0f}")
     print(f"  Timber price range: ${price_data['pt_grid'][0]:.0f} - ${price_data['pt_grid'][-1]:.0f}")
-    
-    # Plot simulated price paths (always if --price-paths-only, otherwise if not --no-plots)
-    if args.price_paths_only:
-        print("\n--- Simulating Price Paths ---")
-        try:
-            os.makedirs('plots', exist_ok=True)
-            # Simulate paths just for the plot (this function is now moved/removed, but we need the logic or just skip)
-            # Actually, the user asked to remove plotting logic. 
-            # If price-paths-only is requested, we should probably just exit or use the new script?
-            # Let's assume we just save the pickle and let the other script handle it.
-            pass
-        except Exception as e:
-            print(f"  Could not generate price paths plot: {e}")
-    
-    # Exit early if only price paths requested (and we're not doing them here anymore)
-    if args.price_paths_only:
-        print("\n" + "=" * 70)
-        print("PRICE PATHS ONLY REQUESTED - PLEASE RUN plot_results.py")
-        print("=" * 70)
-        return None, None, None
     
     # Build state space
     print("\n--- Building State Space ---")
