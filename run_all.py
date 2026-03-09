@@ -6,6 +6,7 @@ import argparse
 from harvest_timing_model import main as run_model
 from harvest_timing_model import ModelParameters
 from plot_utility_histograms import main as plot_utility_histograms
+from argparse import Namespace
 from plot_results import main as plot_results
 
 class MockArgs:
@@ -96,5 +97,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     run_scenarios(grid_size=args.grid_size)
-    plot_utility_histograms()
+    plot_utility_histograms(Namespace(scenario_set='baseline', rerun=False))
+    plot_utility_histograms(Namespace(scenario_set='suboptimal', rerun=False))
     plot_results()

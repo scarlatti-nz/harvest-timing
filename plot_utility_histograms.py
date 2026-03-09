@@ -250,7 +250,7 @@ def run_simulations(
         
     return np.array(npvs), np.array(carbon_npvs), np.array(timber_npvs), np.array(harvest_ages), np.array(avg_carbon_prices), np.array(avg_timber_prices)
 
-def main():
+def main(args=None):
     # Set global font sizes for all plots
     plt.rcParams.update({
         'font.size': 20,
@@ -270,7 +270,8 @@ def main():
         default='baseline',
         help='Which scenario bundle to run'
     )
-    args = parser.parse_args()
+    if args is None:
+        args = parser.parse_args()
 
     scenarios = SCENARIOS_SUBOPTIMAL if args.scenario_set == 'suboptimal' else SCENARIOS_BASELINE
 
@@ -435,7 +436,7 @@ def main():
     
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     fig.suptitle("Distribution of NPV at planting under optimal decision-making (n=5000)", y=0.98, fontweight='bold')
-    output_path = 'plots/utility_histograms.png'
+    output_path = f'plots/utility_histograms_{args.scenario_set}.png'
     os.makedirs('plots', exist_ok=True)
     plt.savefig(output_path, dpi=150)
     print(f"Main plot saved to {output_path}")
@@ -457,7 +458,7 @@ def main():
     plt.legend()
     plt.grid(True, alpha=0.3)
     
-    output_path_cdf = 'plots/utility_cdf.png'
+    output_path_cdf = f'plots/utility_cdf_{args.scenario_set}.png'
     plt.savefig(output_path_cdf, dpi=150)
     plt.close()
     print(f"CDF plot saved to {output_path_cdf}")
@@ -487,13 +488,13 @@ def main():
         ax.legend()
         ax.grid(True, alpha=0.3)
 
-    for i, res in enumerate(results_storage):
-        sc = res['scenario']
-        plot_components(
-            axes2[i], res['carbon'], res['timber'],
-            title=f'Utility Components: {sc["name"]}',
-            color_carbon=sc['color_carbon'], color_timber=sc['color_timber']
-        )
+    # for i, res in enumerate(results_storage):
+    #     sc = res['scenario']
+    #     plot_components(
+    #         axes2[i], res['carbon'], res['timber'],
+    #         title=f'Utility Components: {sc["name"]}',
+    #         color_carbon=sc['color_carbon'], color_timber=sc['color_timber']
+    #     )
     
     for ax in axes2:
         ax.set_xlabel('Net present value ($/ha)')
@@ -561,7 +562,7 @@ def main():
 
     fig3.suptitle("Distribution of harvest age under optimal decision-making (n=5000)", y=0.98, fontweight='bold')
     plt.tight_layout(rect=[0, 0, 1, 0.95])
-    output_path_ages = 'plots/harvest_age_histograms.png'
+    output_path_ages = f'plots/harvest_age_histograms_{args.scenario_set}.png'
     plt.savefig(output_path_ages, dpi=150)
     print(f"Harvest age plot saved to {output_path_ages}")
 

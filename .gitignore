@@ -208,7 +208,6 @@ __marimo__/
 
 
 design/
-plots/
 reward_matrix.csv
 *.pkl
 outputs/

@@ -1137,34 +1137,6 @@ def main():
         regime_label='averaging accounting',
         save_path=os.path.join(args.output_dir, 'conference_averaging.png')
     )
-    plot_trajectory_revenue_conference(
-        sim_data_averaging, params,
-        regime_label='averaging accounting',
-        save_path=os.path.join(args.output_dir, 'conference_averaging_revenue.png')
-    )
-    
-    # Regime 2: Stock-change (Permanent, no penalty)
-    print("  Simulating Stock-change regime (regime=2)...")
-    sim_data_stockchange = simulate_single_trajectory(
-        params, state_space, price_data, R, Q_sa, V, sigma, C_age,
-        n_years=n_conference_years,
-        seed=conference_seed,
-        carbon_prices=carbon_prices_shared.copy(),
-        timber_prices=timber_prices_shared.copy(),
-        initial_age=1,
-        initial_regime=2,
-        initial_rotation=1
-    )
-    plot_trajectory_conference(
-        sim_data_stockchange, params,
-        regime_label='Stock-change Accounting',
-        save_path=os.path.join(args.output_dir, 'conference_stockchange.png')
-    )
-    plot_trajectory_revenue_conference(
-        sim_data_stockchange, params,
-        regime_label='Stock-change Accounting',
-        save_path=os.path.join(args.output_dir, 'conference_stockchange_revenue.png')
-    )
     
     macro_impact(
         delta_npv_sc_opt=5141,
