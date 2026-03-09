@@ -2,18 +2,17 @@
 Script to run multiple model scenarios by overriding parameters.
 """
 
-import os
 import argparse
 from harvest_timing_model import main as run_model
 from harvest_timing_model import ModelParameters
+from plot_utility_histograms import main as plot_utility_histograms
+from plot_results import main as plot_results
 
 class MockArgs:
-    def __init__(self, temp_dir='temp', grid_size=9, no_plots=True):
+    def __init__(self, temp_dir='temp', grid_size=9):
         self.temp_dir = temp_dir
         self.grid_size = grid_size
-        self.no_plots = no_plots
         self.sanity_checks = False
-        self.price_paths_only = False
 
 def run_scenarios(grid_size=9):
     scenarios = [
@@ -58,6 +57,14 @@ def run_scenarios(grid_size=9):
                 'pc_rho': 0.96,
                 'pc_sigma': 0.2
             }
+        },
+        {
+            'name': 'stock-change-bank-credit',
+            'overrides': {
+                'switch_cost': 1e9,
+                'harvest_penalty_per_m3': 10000.0,
+                'carbon_credit_max_age': 10, # Bank credits beyond age 10 to surrender at harvest - functionally no carbon revenue
+            }
         }
     ]
 
@@ -77,8 +84,7 @@ def run_scenarios(grid_size=9):
         # Setup mock arguments for the main function
         args = MockArgs(
             temp_dir=sc['name'],
-            grid_size=grid_size,
-            no_plots=True
+            grid_size=grid_size
         )
         
         # Run the model
@@ -90,4 +96,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     run_scenarios(grid_size=args.grid_size)
-
+    plot_utility_histograms()
+    plot_results()

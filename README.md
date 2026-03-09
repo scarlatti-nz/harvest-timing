@@ -1,0 +1,34 @@
+# Overview
+This repository implements an infinite-horizon real options model for the timing of radiata pine harvests under New Zealand’s Emissions Trading Scheme (ETS). It couples stochastic carbon and timber prices with stand growth, credits, liabilities, and switching choices across ETS accounting regimes. The code is geared toward comparative scenario analysis for policy work. 
+
+# Quickstart
+- macOS / Linux  
+  1) Install [uv](https://docs.astral.sh/uv/install/) (or use the one you already have): `curl -LsSf https://astral.sh/uv/install.sh | sh`  
+  2) Create env and install deps: `uv venv .venv && source .venv/bin/activate && uv pip install -r requirements.txt`  
+  3) Run preset scenarios + generate plots in one go: `python run_all.py`.
+- Windows (PowerShell)  
+  1) Install uv: `powershell -ExecutionPolicy Bypass -c "irm https://astral.sh/uv/install.ps1 | iex"`  
+  2) Env + deps: `uv venv .venv ; .\\.venv\\Scripts\\activate ; uv pip install -r requirements.txt`  
+  3) Run everything: `python run_all.py`.
+- Vanilla Python fallback (any OS)  
+  `python -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt`
+
+
+# Harvest timing model
+The model in `harvest_timing_model.py` solves an infinite-horizon dynamic program with QuantEcon’s `DiscreteDP`. The state tuple is `(age, carbon price index, timber price index, regime, rotation)`, spanning ages 0–52, discretized carbon prices (`N_pc`) and timber prices (`N_pt`), ETS regimes (`0` averaging, `1` permanent, `2` pre‑2023 stock-change), and rotation indicator (`1` first, `2` subsequent). Actions are `do nothing`, `harvest and replant`, and `switch to permanent` (only meaningful from averaging). Age advances deterministically unless a harvest resets it to 0; harvests in first rotation flip rotation to 2. Prices follow independent log-AR(1) processes discretized with Tauchen; you control means, persistence, and volatility via `ModelParameters` (e.g., `pc_mean`, `pc_rho`, `pc_sigma` for carbon; `pt_mean`, `pt_rho`, `pt_sigma` for timber). Growth uses a squared logistic carbon curve `C(a)=C_max*(1-exp(-k*a))^2`; timber volume is a linear multiple of carbon with an age-specific quality scaler that rises through the 20s and decays after 35–45, letting price × quality capture wood grade effects.
+
+Reward construction mirrors ETS accounting rules. Under averaging (regime 0), carbon credits accrue only in the first rotation up to `carbon_credit_max_age` (default 16) and there is no carbon liability on harvest. Permanent (regime 1) earns credits indefinitely but pays a harvest liability equal to carbon price × carbon stock, split 50% instantly and 50% over `carbon_liability_years` with discounting (`carbon_liability_instant_fraction`). A [per‑m³ harvest penalty](https://www.legislation.govt.nz/regulation/public/2022/0266/latest/LMS709799.html) (`harvest_penalty_per_m3`) further discourages harvest in permanent. The legacy (discontinued in 2023 but still available for forests established under this regime before the change) stock‑change regime (regime 2) mirrors permanent crediting but omits the harvest penalty and cannot be switched into. Maintenance, replant, flat harvest costs, and optional switching costs (`switch_cost`) are all parameterized. The reward matrix is exported to `reward_matrix.csv` with human-readable labels for inspection.
+
+For simplicity's sake, we opt to set the switching cost and harvest penalty to arbitrarily high numbers in `run_all.py` for the scenarios used in the 2026 AARES conference talk. With these constraints removed, the optimal behaviour is to switch from averaging into permanent at the age of 16 to continue to receive NZUs past the averaging age, then simply harvest and pay the $10/m^3 deemed value penalty when the prices make this suitable - in essence, to behave as if one is already in stock change. This is an interesting finding, but makes it difficult to compare the expected values of the different regime, since they all functionally converge on stock change.
+
+Transition matrices assume independence between carbon and timber price shocks; each action branches over all price grid combinations, yielding a sparse state–action transition matrix. The model typically solves via policy iteration, returning the value function `V` and optimal policy `sigma`. Running `harvest_timing_model.py` saves a timestamped parameter snapshot, the pickle `outputs/<temp_dir>/model_results.pkl` (containing parameters, state space, price grids, value function, policy, and one sample trajectory), and prints summary growth/price ranges. You can build new scenarios by either editing the `ModelParameters` defaults, passing CLI flags like `--grid-size`, or instantiating `ModelParameters(**overrides)` inside custom drivers such as `run_all.py` (e.g., raising `pc_mean`, lowering `pc_sigma`, toggling `switch_cost`, or changing `carbon_credit_max_age`). 
+
+
+# Plot utility histograms
+`plot_utility_histograms.py` runs (or reuses cached) Monte Carlo trajectories for each listed scenario/regime to show the distribution of discounted net revenues at time 0. It rebuilds rewards to decompose carbon vs timber contributions, simulates 5,000 price/growth paths per scenario, and caches per-simulation NPVs, average prices, and harvest ages to CSVs in `outputs/<scenario>`. Use `--rerun` to ignore caches after changing parameters. The script defaults to the `baseline` pickle and compares averaging, permanent, and stock‑change regimes, with optional commented variants (forced harvest age, banked credits) you can toggle inside the scenario lists. It also provides a CLI argument `--scenario-set` which can be used to toggle between the optimal-behaviour and suboptimal-behaviour scenarios presented in the conference talk.
+
+# Plot results
+`plot_results.py` reloads a model pickle, reconstructs rewards/transitions, and generates conference presentation-style figures: price trajectory simulations, accounting comparison charts (pulling growth data from `data/growth_curves.xlsx`), decision heatmaps/value overlays, and two‑panel utility-evolution plots that reuse shared price paths. Several panels contain hardcoded numbers or references to spreadsheet inputs used for the conference submission, so regenerate them only after confirming the underlying xlsx files and constants are still appropriate. Outputs default to `plots/`; point `--temp-dir` or `--pickle-path` to alternate scenarios.
+
+# Forest inventory simulation
+`forest_inventory_simulation.py` is a rough prototype that applies an optimal policy to a national age-class table (NEFD-2022) scaled to a target area (default 1.7 M ha). It pushes each age class through simulated price paths, harvests when the policy says so, and plots total harvest volume (and price overlays) over 20–50 years. It is intentionally lightweight, with no regeneration of policies or regional detail, so treat results as illustrative only.
