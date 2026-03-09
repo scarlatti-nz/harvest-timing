@@ -1,7 +1,15 @@
+# NOTE: This project currently requires Python <3.10 due to the transitive dependency
+# chain `quantecon -> numba -> llvmlite` (older llvmlite releases do not support Python 3.12).
+#
+# Recommended setup (uv):
+#   uv python install 3.9
+#   uv python pin 3.9
+#   uv venv
+#   uv pip install -r requirements.txt
+#
 numpy>=1.24.0
 quantecon>=0.7.0
 matplotlib>=3.7.0
 scipy>=1.10.0
 pandas>=2.0.0
 openpyxl>=3.1.0
-
