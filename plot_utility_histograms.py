@@ -4,16 +4,29 @@ Script to generate histograms of simulated utilities (NPV) at time 0.
 
 import numpy as np
 import matplotlib.pyplot as plt
-import pickle
 import os
 import argparse
-from tqdm import tqdm
+
+from paper_style import (
+    REGIME_COLORS,
+    REFERENCE_COLOR,
+    configure_paper_style,
+    save_figure,
+    style_axes,
+)
 from harvest_timing_model import (
     ModelParameters, StateSpace, simulate_single_trajectory,
     compute_carbon_curve, compute_volume_from_carbon,
     compute_carbon_flows_averaging, compute_carbon_flows_permanent,
     compute_price_quality_factor, build_reward_matrix, build_transition_matrix,
     ACTION_DO_NOTHING, ACTION_HARVEST_REPLANT, ACTION_SWITCH_PERMANENT, N_ACTIONS
+)
+from grid_config import (
+    DEFAULT_PRICE_GRID_SIZE,
+    load_results_pickle,
+    model_results_path,
+    plot_output_dir,
+    scenario_cache_path,
 )
 
 SCENARIOS_BASELINE = [
@@ -22,27 +35,21 @@ SCENARIOS_BASELINE = [
         'dir': 'baseline',
         'regime': 0,
         'rotation': 1,
-        'color': '#3498db',
-        'color_carbon': '#16a085',
-        'color_timber': '#2980b9'
+        'color': REGIME_COLORS['averaging'],
     },
     {
         'name': 'Permanent',
         'dir': 'baseline',
         'regime': 1,
         'rotation': 1,
-        'color': '#e67e22',
-        'color_carbon': '#d35400',
-        'color_timber': '#f39c12'
+        'color': REGIME_COLORS['permanent'],
     },
     {
         'name': 'Stock change',
         'dir': 'baseline',
         'regime': 2,
         'rotation': 1,
-        'color': '#8e44ad',
-        'color_carbon': '#27ae60',
-        'color_timber': '#8e44ad'
+        'color': REGIME_COLORS['stock_change'],
     },
 ]
 
@@ -52,18 +59,14 @@ SCENARIOS_SUBOPTIMAL = [
         'dir': 'baseline',
         'regime': 0,
         'rotation': 1,
-        'color': '#3498db',
-        'color_carbon': '#16a085',
-        'color_timber': '#2980b9'
+        'color': REGIME_COLORS['averaging'],
     },
     {
         'name': 'Stock change (force harvest at age 28)',
         'dir': 'baseline',
         'regime': 2,
         'rotation': 1,
-        'color': '#27ae60',
-        'color_carbon': '#16a085',
-        'color_timber': '#2980b9',
+        'color': REGIME_COLORS['stock_change'],
         'force_age': 28,
     },
     {
@@ -71,11 +74,11 @@ SCENARIOS_SUBOPTIMAL = [
         'dir': 'stock-change-bank-credit',
         'regime': 0,
         'rotation': 1,
-        'color': '#633a01',
-        'color_carbon': '#16a085',
-        'color_timber': '#2980b9',
+        'color': '#7E6148',
     }
 ]
+
+REQUIRED_CACHE_COLUMNS = {'carbon', 'timber', 'total', 'avg_pc', 'avg_pt', 'harvest_age'}
 
 
 def build_reward_components(
@@ -194,7 +197,7 @@ def run_simulations(
     
     print(f"Simulating {n_sims} trajectories for Regime={regime}, Rotation={rotation}...")
     
-    for i in tqdm(range(n_sims)):
+    for i in range(n_sims):
         # Run simulation
         # Start at Age 0 (bare land/just planted) to capture full lifecycle cost/benefit
         data = simulate_single_trajectory(
@@ -250,17 +253,26 @@ def run_simulations(
         
     return np.array(npvs), np.array(carbon_npvs), np.array(timber_npvs), np.array(harvest_ages), np.array(avg_carbon_prices), np.array(avg_timber_prices)
 
+
+def load_cached_scenario_results(csv_path, scenario):
+    data = np.genfromtxt(csv_path, delimiter=',', names=True, skip_header=0)
+    available_cols = set(data.dtype.names or ())
+    if not REQUIRED_CACHE_COLUMNS.issubset(available_cols):
+        missing_cols = sorted(REQUIRED_CACHE_COLUMNS - available_cols)
+        raise ValueError(f"missing required columns: {', '.join(missing_cols)}")
+
+    return {
+        'scenario': scenario,
+        'npvs': data['total'],
+        'carbon': data['carbon'],
+        'timber': data['timber'],
+        'harvest_ages': data['harvest_age'],
+        'avg_pc': data['avg_pc'],
+        'avg_pt': data['avg_pt']
+    }
+
 def main(args=None):
-    # Set global font sizes for all plots
-    plt.rcParams.update({
-        'font.size': 20,
-        'axes.titlesize': 20,
-        'axes.labelsize': 20,
-        'xtick.labelsize': 18,
-        'ytick.labelsize': 18,
-        'legend.fontsize': 20,
-        'figure.titlesize': 28
-    })
+    configure_paper_style()
 
     parser = argparse.ArgumentParser(description="Generate histograms of simulated utilities")
     parser.add_argument('--rerun', action='store_true', help='Force rerun of simulations even if cached CSVs exist')
@@ -270,10 +282,45 @@ def main(args=None):
         default='baseline',
         help='Which scenario bundle to run'
     )
+    parser.add_argument(
+        '--output-dir',
+        default=None,
+        help='Directory to save figures (defaults to a grid-specific plots path)'
+    )
+    parser.add_argument(
+        '--grid-size',
+        type=int,
+        default=DEFAULT_PRICE_GRID_SIZE,
+        help=f'Grid size used to resolve default pickles (default: {DEFAULT_PRICE_GRID_SIZE})'
+    )
+    parser.add_argument(
+        '--pickle-path',
+        default=None,
+        help='Optional model_results.pkl to use for baseline scenarios'
+    )
     if args is None:
         args = parser.parse_args()
 
-    scenarios = SCENARIOS_SUBOPTIMAL if args.scenario_set == 'suboptimal' else SCENARIOS_BASELINE
+    scenario_set = getattr(args, 'scenario_set', 'baseline')
+    grid_size = getattr(args, 'grid_size', DEFAULT_PRICE_GRID_SIZE)
+    pickle_path_arg = getattr(args, 'pickle_path', None)
+    output_dir = getattr(args, 'output_dir', None)
+    scenarios = SCENARIOS_SUBOPTIMAL if scenario_set == 'suboptimal' else SCENARIOS_BASELINE
+    default_output_grid_size = grid_size
+
+    if pickle_path_arg is not None:
+        if not os.path.exists(pickle_path_arg):
+            print(f"Error: {pickle_path_arg} not found.")
+            return
+        try:
+            explicit_results = load_results_pickle(pickle_path_arg)
+        except ValueError as exc:
+            print(f"Error: {exc}")
+            return
+        default_output_grid_size = explicit_results['params'].N_pc
+
+    if output_dir is None:
+        output_dir = plot_output_dir(f"utility_{scenario_set}", default_output_grid_size)
 
     results_storage = []
     
@@ -282,44 +329,48 @@ def main(args=None):
     N_YEARS = 50 
 
     for sc in scenarios:
-        csv_path = os.path.join('outputs', sc['dir'], f"{sc['name']}_realized_npvs.csv")
-        
-        # Try to load from cache if not rerunning
-        if not args.rerun and os.path.exists(csv_path):
-            print(f"\n--- Loading Cached Scenario: {sc['name']} ---")
-            try:
-                # Use genfromtxt to handle headers and potential NaNs in harvest_age
-                data = np.genfromtxt(csv_path, delimiter=',', names=True, skip_header=0)
-                
-                # Check if all required columns are present
-                required_cols = {'carbon', 'timber', 'total', 'avg_pc', 'avg_pt', 'harvest_age'}
-                if required_cols.issubset(set(data.dtype.names)):
-                    results_storage.append({
-                        'scenario': sc,
-                        'npvs': data['total'],
-                        'carbon': data['carbon'],
-                        'timber': data['timber'],
-                        'harvest_ages': data['harvest_age'],
-                        'avg_pc': data['avg_pc'],
-                        'avg_pt': data['avg_pt']
-                    })
-                    print(f"  Successfully loaded {len(data)} samples from {csv_path}")
-                    continue
-                else:
-                    print(f"  Warning: Cache file {csv_path} is missing required columns. Rerunning...")
-            except Exception as e:
-                print(f"  Error loading cache {csv_path}: {e}. Rerunning...")
+        if pickle_path_arg and sc['dir'] == 'baseline':
+            pickle_path = pickle_path_arg
+            expected_grid_size = None
+        else:
+            pickle_path = model_results_path(sc['dir'], default_output_grid_size)
+            expected_grid_size = default_output_grid_size
 
-        # If we reach here, we either forced rerun or cache was invalid/missing
-        pickle_path = os.path.join('outputs', sc['dir'], 'model_results.pkl')
+        cache_root = os.path.dirname(pickle_path) or "."
+        csv_path = scenario_cache_path(cache_root, sc['name'])
+
         if not os.path.exists(pickle_path):
             print(f"Warning: {pickle_path} not found. Skipping.")
             continue
 
-        print(f"\n--- Processing Scenario: {sc['name']} ---")
+        try:
+            res = load_results_pickle(pickle_path, expected_grid_size=expected_grid_size)
+        except ValueError as exc:
+            print(f"  Warning: {exc}. Skipping.")
+            continue
+        pickle_mtime_ns = os.stat(pickle_path).st_mtime_ns
+
+        if not getattr(args, 'rerun', False) and os.path.exists(csv_path):
+            csv_mtime_ns = os.stat(csv_path).st_mtime_ns
+            if csv_mtime_ns >= pickle_mtime_ns:
+                print(f"\n--- Loading Cached Scenario: {sc['name']} ---")
+                try:
+                    cached_results = load_cached_scenario_results(csv_path, sc)
+                except Exception as e:
+                    print(f"  Error loading cache {csv_path}: {e}. Rerunning...")
+                else:
+                    results_storage.append(cached_results)
+                    print(f"  Successfully loaded {len(cached_results['npvs'])} samples from {csv_path}")
+                    continue
+            else:
+                print(
+                    f"\n--- Processing Scenario: {sc['name']} ---\n"
+                    f"  Cache {csv_path} is stale because {pickle_path} is newer. Rerunning..."
+                )
+        else:
+            print(f"\n--- Processing Scenario: {sc['name']} ---")
+
         print(f"Loading results from {pickle_path}...")
-        with open(pickle_path, 'rb') as f:
-            res = pickle.load(f)
         
         params = res['params']
         state_space = res['state_space']
@@ -375,7 +426,7 @@ def main(args=None):
         })
 
         # Save realized NPVs and prices to CSV (including harvest_age for caching)
-        os.makedirs(os.path.join('outputs', sc['dir']), exist_ok=True)
+        os.makedirs(cache_root, exist_ok=True)
         data_to_save = np.column_stack((carbon_npvs, timber_npvs, npvs, avg_pc, avg_pt, harvest_ages))
         np.savetxt(csv_path, data_to_save, delimiter=',', header='carbon,timber,total,avg_pc,avg_pt,harvest_age', comments='')
         print(f"  Saved realized results to {csv_path}")
@@ -405,7 +456,8 @@ def main(args=None):
         n_cols = 2
         n_rows = int(np.ceil(len(results_storage)/2))
     
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(24, 5 * n_rows), sharex=False)
+    fig_width = 3.5 if n_cols == 1 else 7.2
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_width, 2.2 * n_rows), sharex=False)
     if isinstance(axes, np.ndarray):
         axes = axes.flatten()
     else:
@@ -423,86 +475,46 @@ def main(args=None):
         ax = axes[i]
         
         ax.hist(npvs, bins=bins, color=sc['color'], alpha=0.7, edgecolor='black')
-        ax.axvline(np.mean(npvs), color='red', linestyle='dashed', linewidth=2, 
+        ax.axvline(np.mean(npvs), color=REFERENCE_COLOR, linestyle='dashed', linewidth=0.9, 
                   label=f'Mean: ${np.mean(npvs):,.0f}')
-        ax.set_title(f'{sc["name"]}', fontweight='bold')
+        ax.set_title(f'{sc["name"]}')
         ax.set_ylabel('Frequency')
         ax.set_xlim(left=min_val, right=80000)
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+        ax.legend(frameon=False)
+        style_axes(ax)
         
     for ax in axes:
-        ax.set_xlabel('Net present value ($/ha)')
+        ax.set_xlabel('Net present value ($ per ha)')
     
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    fig.suptitle("Distribution of NPV at planting under optimal decision-making (n=5000)", y=0.98, fontweight='bold')
-    output_path = f'plots/utility_histograms_{args.scenario_set}.png'
-    os.makedirs('plots', exist_ok=True)
-    plt.savefig(output_path, dpi=150)
+    for ax in axes[len(results_storage):]:
+        ax.remove()
+
+    fig.subplots_adjust(left=0.18 if n_cols == 1 else 0.10, right=0.98, top=0.98, bottom=0.16, hspace=0.32, wspace=0.22)
+    output_path = os.path.join(output_dir, f'utility_histograms_{scenario_set}.png')
+    os.makedirs(output_dir, exist_ok=True)
+    save_figure(fig, output_path)
     print(f"Main plot saved to {output_path}")
 
     # 1b. CDF of NPVs (All scenarios on one plot)
     print("Generating CDF plot...")
-    plt.figure(figsize=(16, 9))
+    fig_cdf, ax_cdf = plt.subplots(figsize=(3.5, 2.6))
     for res in results_storage:
         sc = res['scenario']
         npvs = np.sort(res['npvs'])
         cdf = np.arange(1, len(npvs) + 1) / len(npvs)
         ls = sc.get('linestyle', '-')
-        plt.plot(npvs, cdf, label=sc['name'], color=sc['color'], linewidth=3, linestyle=ls)
+        ax_cdf.plot(npvs, cdf, label=sc['name'], color=sc['color'], linewidth=1.2, linestyle=ls)
     
-    plt.title('Cumulative distribution of realized utilities (NPV)', fontweight='bold')
-    plt.xlabel('Net present value ($/ha)')
-    plt.ylabel('Cumulative probability')
-    plt.xlim(0, 80000)
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    output_path_cdf = f'plots/utility_cdf_{args.scenario_set}.png'
-    plt.savefig(output_path_cdf, dpi=150)
-    plt.close()
+    ax_cdf.set_xlabel('Net present value ($ per ha)')
+    ax_cdf.set_ylabel('Cumulative probability')
+    ax_cdf.set_xlim(0, 80000)
+    ax_cdf.legend(frameon=False)
+    style_axes(ax_cdf)
+    fig_cdf.subplots_adjust(left=0.18, right=0.98, top=0.98, bottom=0.18)
+
+    output_path_cdf = os.path.join(output_dir, f'utility_cdf_{scenario_set}.png')
+    save_figure(fig_cdf, output_path_cdf)
     print(f"CDF plot saved to {output_path_cdf}")
-
-    # 2. Carbon vs Timber Components
-    print("Generating component plot...")
-    fig2, axes2 = plt.subplots(n_rows, n_cols, figsize=(10, 5 * n_rows), sharex=True)
-    if isinstance(axes2, np.ndarray):
-        axes2 = axes2.flatten()
-    else:
-        axes2 = [axes2]
-
-    def plot_components(ax, carbon_vals, timber_vals, title, color_carbon, color_timber):
-        combined_min = min(np.min(carbon_vals), np.min(timber_vals))
-        combined_max = 80000 # Cap at 80,000 as requested
-        bins = np.linspace(combined_min, combined_max, 50)
-
-        ax.hist(timber_vals, bins=bins, color=color_timber, alpha=0.6, edgecolor='black', label='Timber utility')
-        ax.axvline(np.mean(timber_vals), color=color_timber, linestyle='dashed', linewidth=2, label=f'Timber mean: ${np.mean(timber_vals):,.0f}')
-
-        ax.hist(carbon_vals, bins=bins, color=color_carbon, alpha=0.6, edgecolor='black', label='Carbon utility')
-        ax.axvline(np.mean(carbon_vals), color=color_carbon, linestyle='dashed', linewidth=2, label=f'Carbon mean: ${np.mean(carbon_vals):,.0f}')
-
-        ax.set_title(title, fontweight='bold')
-        ax.set_ylabel('Frequency')
-        ax.set_xlim(left=combined_min, right=80000)
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-
-    # for i, res in enumerate(results_storage):
-    #     sc = res['scenario']
-    #     plot_components(
-    #         axes2[i], res['carbon'], res['timber'],
-    #         title=f'Utility Components: {sc["name"]}',
-    #         color_carbon=sc['color_carbon'], color_timber=sc['color_timber']
-    #     )
-    
-    for ax in axes2:
-        ax.set_xlabel('Net present value ($/ha)')
-
-    plt.tight_layout()
-    output_path_components = 'plots/utility_histograms_components.png'
-    plt.savefig(output_path_components, dpi=150)
-    print(f"Component plot saved to {output_path_components}")
 
     # 3. Age at First Harvest
     print("Generating harvest age plot...")
@@ -517,7 +529,8 @@ def main(args=None):
         n_cols_h = 2
         n_rows_h = int(np.ceil(n_harvest_plots / 2))
 
-    fig3, axes3 = plt.subplots(n_rows_h, n_cols_h, figsize=(16, 5 * n_rows_h), sharex=False)
+    fig_width_h = 3.5 if n_cols_h == 1 else 7.2
+    fig3, axes3 = plt.subplots(n_rows_h, n_cols_h, figsize=(fig_width_h, 2.2 * n_rows_h), sharex=False)
     if isinstance(axes3, np.ndarray):
         axes3 = axes3.flatten()
     else:
@@ -544,26 +557,28 @@ def main(args=None):
         ax = axes3[i]
         if len(valid_ages) > 0:
             ax.hist(valid_ages, bins=age_bins, color=sc['color'], alpha=0.7, edgecolor='black')
-            ax.axvline(np.mean(valid_ages), color='red', linestyle='dashed', linewidth=2, 
+            ax.axvline(np.mean(valid_ages), color=REFERENCE_COLOR, linestyle='dashed', linewidth=0.9, 
                       label=f'Mean Age: {np.mean(valid_ages):.1f}')
         
         title = f'{sc["name"]}'
         if n_no_harvest > 0:
             title += f' ({n_no_harvest}/{len(ages)} never harvested)'
             
-        ax.set_title(title, fontweight='bold')
+        ax.set_title(title)
         ax.set_ylabel('Frequency')
         ax.set_xlim(left=0)
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+        ax.legend(frameon=False)
+        style_axes(ax)
         
     for ax in axes3:
         ax.set_xlabel('Age at first harvest (years)')
 
-    fig3.suptitle("Distribution of harvest age under optimal decision-making (n=5000)", y=0.98, fontweight='bold')
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    output_path_ages = f'plots/harvest_age_histograms_{args.scenario_set}.png'
-    plt.savefig(output_path_ages, dpi=150)
+    for ax in axes3[len(harvest_results):]:
+        ax.remove()
+
+    fig3.subplots_adjust(left=0.18 if n_cols_h == 1 else 0.10, right=0.98, top=0.98, bottom=0.16, hspace=0.32, wspace=0.22)
+    output_path_ages = os.path.join(output_dir, f'harvest_age_histograms_{scenario_set}.png')
+    save_figure(fig3, output_path_ages)
     print(f"Harvest age plot saved to {output_path_ages}")
 
 if __name__ == "__main__":

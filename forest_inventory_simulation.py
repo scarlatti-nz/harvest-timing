@@ -1,10 +1,15 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-import pickle
 import argparse
 from typing import Dict, List
 
+from grid_config import (
+    DEFAULT_PRICE_GRID_SIZE,
+    load_results_pickle,
+    model_results_path,
+    plot_output_dir,
+)
 # Import definitions from main model
 from harvest_timing_model import (
     ModelParameters, 
@@ -123,21 +128,41 @@ def simulate_forest_inventory(
 
 def main():
     parser = argparse.ArgumentParser(description="Simulate 1.7m ha forest inventory over 20 years.")
-    parser.add_argument('--pickle-path', type=str, default='outputs/baseline/model_results.pkl',
-                        help='Path to model results pickle file')
+    parser.add_argument('--temp-dir', type=str, default='baseline',
+                        help='Directory containing the pickle file (default: baseline)')
+    parser.add_argument(
+        '--grid-size',
+        type=int,
+        default=DEFAULT_PRICE_GRID_SIZE,
+        help=f'Grid size used to resolve the default pickle path (default: {DEFAULT_PRICE_GRID_SIZE})',
+    )
+    parser.add_argument('--pickle-path', type=str, default=None,
+                        help='Path to model results pickle file (overrides --temp-dir and --grid-size)')
+    parser.add_argument('--output-dir', type=str, default=None,
+                        help='Directory to save plots (defaults to a grid-specific plots path)')
     parser.add_argument('--regime', type=int, choices=[0, 1, 2], default=0,
                         help='Regime for all forests (0: averaging, 1: permanent, 2: pre-2023 stock-change)')
     parser.add_argument('--n-years', type=int, default=50, help='Number of years to simulate')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for price paths')
     args = parser.parse_args()
+
+    if args.pickle_path is None:
+        pickle_path = model_results_path(args.temp_dir, args.grid_size)
+        expected_grid_size = args.grid_size
+    else:
+        pickle_path = args.pickle_path
+        expected_grid_size = None
     
     # Load results
-    if not os.path.exists(args.pickle_path):
-        print(f"Error: {args.pickle_path} not found.")
+    if not os.path.exists(pickle_path):
+        print(f"Error: {pickle_path} not found.")
         return
-        
-    with open(args.pickle_path, 'rb') as f:
-        results = pickle.load(f)
+
+    try:
+        results = load_results_pickle(pickle_path, expected_grid_size=expected_grid_size)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return
         
     regime_names = {0: 'averaging', 1: 'permanent', 2: 'pre-2023 stock-change'}
     regime_name = regime_names[args.regime]
@@ -146,7 +171,8 @@ def main():
     sim_results = simulate_forest_inventory(results, args.regime, n_years=args.n_years, seed=args.seed)
     
     # Plotting
-    os.makedirs('plots', exist_ok=True)
+    output_dir = args.output_dir or plot_output_dir("forest_inventory", results['params'].N_pc)
+    os.makedirs(output_dir, exist_ok=True)
     
     # Chart 1: Harvest Volume
     plt.figure(figsize=(10, 6))
@@ -157,7 +183,10 @@ def main():
     plt.grid(True, alpha=0.3)
     plt.xticks(sim_results['years'])
     
-    chart1_path = f'plots/harvest_volume_{regime_name.lower().replace(" ", "_")}.png'
+    chart1_path = os.path.join(
+        output_dir,
+        f'harvest_volume_{regime_name.lower().replace(" ", "_")}.png',
+    )
     plt.savefig(chart1_path, dpi=150, bbox_inches='tight')
     print(f"Chart saved to {chart1_path}")
     
@@ -188,11 +217,12 @@ def main():
     plt.xticks(sim_results['years'])
     plt.tight_layout()
     
-    chart2_path = f'plots/harvest_volume_with_prices_{regime_name.lower().replace(" ", "_")}.png'
+    chart2_path = os.path.join(
+        output_dir,
+        f'harvest_volume_with_prices_{regime_name.lower().replace(" ", "_")}.png',
+    )
     plt.savefig(chart2_path, dpi=150, bbox_inches='tight')
     print(f"Chart with prices saved to {chart2_path}")
 
 if __name__ == "__main__":
     main()
-
-

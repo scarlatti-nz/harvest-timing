@@ -8,14 +8,15 @@ from harvest_timing_model import ModelParameters
 from plot_utility_histograms import main as plot_utility_histograms
 from argparse import Namespace
 from plot_results import main as plot_results
+from grid_config import DEFAULT_PRICE_GRID_SIZE
 
 class MockArgs:
-    def __init__(self, temp_dir='temp', grid_size=9):
+    def __init__(self, temp_dir='temp', grid_size=DEFAULT_PRICE_GRID_SIZE):
         self.temp_dir = temp_dir
         self.grid_size = grid_size
         self.sanity_checks = False
 
-def run_scenarios(grid_size=9):
+def run_scenarios(grid_size=DEFAULT_PRICE_GRID_SIZE):
     scenarios = [
         {
             'name': 'baseline',
@@ -93,10 +94,38 @@ def run_scenarios(grid_size=9):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run multiple harvest timing scenarios")
-    parser.add_argument('--grid-size', type=int, default=9, help='Grid size for price discretization')
+    parser.add_argument(
+        '--grid-size',
+        type=int,
+        default=DEFAULT_PRICE_GRID_SIZE,
+        help=f'Grid size for price discretization (default: {DEFAULT_PRICE_GRID_SIZE})',
+    )
     args = parser.parse_args()
     
     run_scenarios(grid_size=args.grid_size)
-    plot_utility_histograms(Namespace(scenario_set='baseline', rerun=False))
-    plot_utility_histograms(Namespace(scenario_set='suboptimal', rerun=False))
-    plot_results()
+    plot_utility_histograms(
+        Namespace(
+            scenario_set='baseline',
+            rerun=False,
+            grid_size=args.grid_size,
+            output_dir=None,
+            pickle_path=None,
+        )
+    )
+    plot_utility_histograms(
+        Namespace(
+            scenario_set='suboptimal',
+            rerun=False,
+            grid_size=args.grid_size,
+            output_dir=None,
+            pickle_path=None,
+        )
+    )
+    plot_results(
+        Namespace(
+            temp_dir='baseline',
+            grid_size=args.grid_size,
+            pickle_path=None,
+            output_dir=None,
+        )
+    )

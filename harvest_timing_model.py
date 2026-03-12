@@ -24,6 +24,14 @@ import os
 import time
 import datetime
 
+from grid_config import (
+    DEFAULT_PRICE_GRID_SIZE,
+    build_results_metadata,
+    model_parameters_path,
+    model_results_path,
+    output_root,
+)
+
 
 # =============================================================================
 # 1. Configuration / Parameter Block
@@ -41,8 +49,8 @@ class ModelParameters:
     carbon_credit_max_age: int = 16  # Carbon credits stop at this age under averaging
     
     # Price grid sizes
-    N_pt: int = 9   # Number of timber price states
-    N_pc: int = 9   # Number of carbon price states
+    N_pt: int = DEFAULT_PRICE_GRID_SIZE   # Number of timber price states
+    N_pc: int = DEFAULT_PRICE_GRID_SIZE   # Number of carbon price states
     
     # Price process parameters (AR(1) in logs)
     # Carbon price
@@ -971,7 +979,7 @@ def simulate_single_trajectory(
                 import scipy.sparse as sp
                 if sp.issparse(Q):
                     row = s * N_ACTIONS + a
-                    expected_v = float(Q[row].dot(V))
+                    expected_v = float(np.asarray(Q[row].dot(V)).reshape(-1)[0])
             except Exception:
                 expected_v = None
 
@@ -1047,8 +1055,11 @@ Examples:
     parser.add_argument(
         '--grid-size',
         type=int,
-        default=7,
-        help='Number of price states for both timber and carbon prices (default: 7)'
+        default=DEFAULT_PRICE_GRID_SIZE,
+        help=(
+            'Number of price states for both timber and carbon prices '
+            f'(default: {DEFAULT_PRICE_GRID_SIZE})'
+        )
     )
     parser.add_argument(
         '--temp-dir',
@@ -1059,13 +1070,12 @@ Examples:
     return parser.parse_args()
 
 
-def save_model_parameters_to_txt(params: ModelParameters, directory: str):
+def save_model_parameters_to_txt(params: ModelParameters, run_name: str):
     """
     Save model parameters to a text file with a timestamp in the specified directory.
     """
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"model_parameters_{timestamp}.txt"
-    filepath = os.path.join('outputs',directory, filename)
+    filepath = model_parameters_path(run_name, params.N_pc, timestamp)
     
     with open(filepath, 'w') as f:
         f.write(f"Model Parameters - Saved at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -1190,8 +1200,9 @@ def main(args=None, params=None):
     # Save results to pickle
     print("\n--- Saving Results ---")
     import pickle
-    os.makedirs('outputs/'+ args.temp_dir, exist_ok=True)
-    pickle_path = os.path.join('outputs', args.temp_dir, 'model_results.pkl')
+    run_output_dir = output_root(args.temp_dir, params.N_pc)
+    os.makedirs(run_output_dir, exist_ok=True)
+    pickle_path = model_results_path(args.temp_dir, params.N_pc)
     
     # Save parameters to text file
     params_txt_path = save_model_parameters_to_txt(params, args.temp_dir)
@@ -1204,7 +1215,7 @@ def main(args=None, params=None):
         'V': V,
         'sigma': sigma,
         'sim_data': sim_data,
-        # 'C_age': C_age # Not strictly needed if params and growth functions are available, but helpful
+        'metadata': build_results_metadata(params, run_name=args.temp_dir),
     }
     
     with open(pickle_path, 'wb') as f:

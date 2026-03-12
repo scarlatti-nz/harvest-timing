@@ -8,9 +8,21 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import os
-import pickle
 import argparse
 from typing import Dict, Tuple, Optional
+
+from paper_style import (
+    CARBON_PRICE_COLOR,
+    LIGHT_GREY,
+    REFERENCE_COLOR,
+    REGIME_COLORS,
+    TEXT_GREY,
+    TIMBER_PRICE_COLOR,
+    add_panel_label,
+    configure_paper_style,
+    save_figure,
+    style_axes,
+)
 
 # Import definitions from main model
 from harvest_timing_model import (
@@ -29,6 +41,25 @@ from harvest_timing_model import (
     ACTION_HARVEST_REPLANT,
     ACTION_SWITCH_PERMANENT
 )
+from grid_config import (
+    DEFAULT_PRICE_GRID_SIZE,
+    infer_run_name_from_pickle_path,
+    get_results_run_name,
+    load_results_pickle,
+    model_results_path,
+    plot_output_dir,
+)
+
+
+def prepare_save_path(save_path: str) -> str:
+    parent_dir = os.path.dirname(save_path)
+    if not parent_dir:
+        raise ValueError(
+            f"save_path must include a parent directory, got {save_path!r}."
+        )
+    os.makedirs(parent_dir, exist_ok=True)
+    return save_path
+
 
 def plot_price_paths(
     params: ModelParameters,
@@ -42,6 +73,7 @@ def plot_price_paths(
     Shows the stochastic nature of the AR(1) price processes.
     """
     # Simulate paths
+    configure_paper_style()
     carbon_paths = simulate_price_paths(
         params.pc_mean, params.pc_rho, params.pc_sigma,
         n_paths=n_paths, n_periods=n_periods, seed=42, p0=params.pc_0
@@ -51,7 +83,7 @@ def plot_price_paths(
         n_paths=n_paths, n_periods=n_periods, seed=123
     )
     
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(7.2, 2.7))
     
     years = np.arange(n_periods)
     
@@ -60,7 +92,7 @@ def plot_price_paths(
     
     # Plot individual paths with transparency
     for i in range(n_paths):
-        ax.plot(years, carbon_paths[i, :], color='#3498db', alpha=0.03, linewidth=0.5)
+        ax.plot(years, carbon_paths[i, :], color=CARBON_PRICE_COLOR, alpha=0.03, linewidth=0.5)
     
     # Plot percentiles
     p5 = np.percentile(carbon_paths, 5, axis=0)
@@ -69,27 +101,30 @@ def plot_price_paths(
     p75 = np.percentile(carbon_paths, 75, axis=0)
     p95 = np.percentile(carbon_paths, 95, axis=0)
     
-    ax.fill_between(years, p5, p95, alpha=0.2, color='#3498db', label='5th-95th percentile')
-    ax.fill_between(years, p25, p75, alpha=0.3, color='#3498db', label='25th-75th percentile')
-    # ax.plot(years, p50, color='#2c3e50', linewidth=2, label='Median')
-    ax.axhline(params.pc_mean, color='#e74c3c', linestyle='--', linewidth=1.5, label=f'Mean = ${params.pc_mean:.0f}')
-    
-    ax.set_xlabel('Year', fontsize=14)
-    ax.set_ylabel('Carbon price ($/tCO₂)', fontsize=14)
-    ax.set_title(f'Sampled carbon price trajectories (n={n_paths})', 
-                 fontsize=16, fontweight='bold')
-    ax.legend(loc='upper right', fontsize=12)
-    ax.tick_params(axis='both', labelsize=12)
+    ax.fill_between(years, p5, p95, alpha=0.14, color=CARBON_PRICE_COLOR, label='5th-95th percentile')
+    ax.fill_between(years, p25, p75, alpha=0.22, color=CARBON_PRICE_COLOR, label='25th-75th percentile')
+    ax.axhline(
+        params.pc_mean,
+        color=REFERENCE_COLOR,
+        linestyle="--",
+        linewidth=0.9,
+        label=f"Long-run mean (${params.pc_mean:.0f})",
+    )
+    add_panel_label(ax, "a")
+    ax.set_title("Carbon price")
+    ax.set_xlabel('Year')
+    ax.set_ylabel(r'Carbon price (\$ per tCO$_2$)')
+    ax.legend(loc='upper right', frameon=False)
     ax.set_xlim(0, n_periods - 1)
     ax.set_ylim(0, 300)
-    ax.grid(True, alpha=0.3)
+    style_axes(ax)
     
     # --- Timber price paths ---
     ax = axes[1]
     
     # Plot individual paths with transparency
     for i in range(n_paths):
-        ax.plot(years, timber_paths[i, :], color='#27ae60', alpha=0.03, linewidth=0.5)
+        ax.plot(years, timber_paths[i, :], color=TIMBER_PRICE_COLOR, alpha=0.03, linewidth=0.5)
     
     # Plot percentiles
     p5 = np.percentile(timber_paths, 5, axis=0)
@@ -98,74 +133,81 @@ def plot_price_paths(
     p75 = np.percentile(timber_paths, 75, axis=0)
     p95 = np.percentile(timber_paths, 95, axis=0)
     
-    ax.fill_between(years, p5, p95, alpha=0.2, color='#27ae60', label='5th-95th percentile')
-    ax.fill_between(years, p25, p75, alpha=0.3, color='#27ae60', label='25th-75th percentile')
-    # ax.plot(years, p50, color='#2c3e50', linewidth=2, label='Median')
-    ax.axhline(params.pt_mean, color='#e74c3c', linestyle='--', linewidth=1.5, label=f'Mean = ${params.pt_mean:.0f}')
-    
-    ax.set_xlabel('Year', fontsize=14)
-    ax.set_ylabel('Timber price ($/m³)', fontsize=14)
-    ax.set_title(f'Sampled timber price trajectories (n={n_paths})', 
-                 fontsize=16, fontweight='bold')
-    ax.legend(loc='upper right', fontsize=12)
-    ax.tick_params(axis='both', labelsize=12)
+    ax.fill_between(years, p5, p95, alpha=0.14, color=TIMBER_PRICE_COLOR, label='5th-95th percentile')
+    ax.fill_between(years, p25, p75, alpha=0.22, color=TIMBER_PRICE_COLOR, label='25th-75th percentile')
+    ax.axhline(
+        params.pt_mean,
+        color=REFERENCE_COLOR,
+        linestyle="--",
+        linewidth=0.9,
+        label=f"Long-run mean (${params.pt_mean:.0f})",
+    )
+    add_panel_label(ax, "b")
+    ax.set_title("Timber price")
+    ax.set_xlabel('Year')
+    ax.set_ylabel('Timber price ($ per m³)')
+    ax.legend(loc='upper right', frameon=False)
     ax.set_xlim(0, n_periods - 1)
     ax.set_ylim(0, 300)
-    ax.grid(True, alpha=0.3)
+    style_axes(ax)
     
-    plt.tight_layout()
+    fig.subplots_adjust(left=0.08, right=0.995, top=0.92, bottom=0.18, wspace=0.22)
     
     if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"  Price paths plot saved to: {save_path}")
+        prepared_path = prepare_save_path(save_path)
+        save_figure(fig, prepared_path)
+        print(f"  Price paths plot saved to: {prepared_path}")
+    else:
+        plt.close(fig)
     
     # Second figure: just 5 individual paths, no labels, different colors
-    fig2, axes2 = plt.subplots(1, 2, figsize=(14, 5))
+    fig2, axes2 = plt.subplots(1, 2, figsize=(7.2, 2.7))
     
     # Define distinct colors for the 5 paths
-    colors = ['#3498db', '#e74c3c', '#f39c12', '#9b59b6', '#1abc9c']
+    colors = ['#4DBBD5', '#E64B35', '#00A087', '#8491B4', '#7E6148']
     
     # --- Carbon price paths (5 lines) ---
     ax2 = axes2[0]
     for i in range(5):
         ax2.plot(years, carbon_paths[i, :], color=colors[i], alpha=0.8, linewidth=1.5)
     
-    ax2.set_xlabel('Year', fontsize=14)
-    ax2.set_ylabel('Carbon price ($/tCO₂)', fontsize=14)
-    ax2.set_title('Sampled carbon price pathways (5 samples)', 
-                 fontsize=16, fontweight='bold')
-    ax2.tick_params(axis='both', labelsize=12)
+    add_panel_label(ax2, "a")
+    ax2.set_title('Carbon price')
+    ax2.set_xlabel('Year')
+    ax2.set_ylabel(r'Carbon price (\$ per tCO$_2$)')
     ax2.set_xlim(0, n_periods - 1)
     ax2.set_ylim(0, None)
-    ax2.grid(True, alpha=0.3)
+    style_axes(ax2)
     
     # --- Timber price paths (5 lines) ---
     ax2 = axes2[1]
     for i in range(5):
         ax2.plot(years, timber_paths[i, :], color=colors[i], alpha=0.8, linewidth=1.5)
     
-    ax2.set_xlabel('Year', fontsize=14)
-    ax2.set_ylabel('Timber price ($/m³)', fontsize=14)
-    ax2.set_title('Sampled timber price pathways (5 samples)', 
-                 fontsize=16, fontweight='bold')
-    ax2.tick_params(axis='both', labelsize=12)
+    add_panel_label(ax2, "b")
+    ax2.set_title('Timber price')
+    ax2.set_xlabel('Year')
+    ax2.set_ylabel('Timber price ($ per m³)')
     ax2.set_xlim(0, n_periods - 1)
     ax2.set_ylim(0, None)
-    ax2.grid(True, alpha=0.3)
+    style_axes(ax2)
     
-    plt.tight_layout()
+    fig2.subplots_adjust(left=0.08, right=0.995, top=0.92, bottom=0.18, wspace=0.22)
     
     # Save to plots directory if provided, or construct name
     if save_path:
+        prepared_path = prepare_save_path(save_path)
         # Assuming save_path is something like 'plots/price_paths.png'
         # We want 'plots/price_paths_10_samples.png'
-        dir_name = os.path.dirname(save_path)
-        base_name = os.path.basename(save_path)
+        dir_name = os.path.dirname(prepared_path)
+        base_name = os.path.basename(prepared_path)
         name_part = os.path.splitext(base_name)[0]
         ext_part = os.path.splitext(base_name)[1]
         
-        sample_path = os.path.join(dir_name, f"{name_part}_10_samples{ext_part}")
-        plt.savefig(sample_path, dpi=150, bbox_inches='tight')
+        sample_path = os.path.join(dir_name, f"{name_part}_samples{ext_part}")
+        save_figure(fig2, sample_path)
+    else:
+        plt.close(fig2)
 
 
 def plot_decisions_by_price_state(
@@ -218,7 +260,7 @@ def plot_decisions_by_price_state(
         )
         
         ax.set_xlabel('Timber price ($/m³)', fontsize=11)
-        ax.set_ylabel('Carbon price ($/tCO₂)', fontsize=11)
+        ax.set_ylabel(r'Carbon price (\$/tCO$_2$)', fontsize=11)
         ax.set_title(f'Age {age}', fontsize=12, fontweight='bold')
     
     # Add colorbar
@@ -231,8 +273,9 @@ def plot_decisions_by_price_state(
     plt.tight_layout(rect=[0, 0, 0.9, 1])
     
     if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"  Saved: {save_path}")
+        prepared_path = prepare_save_path(save_path)
+        plt.savefig(prepared_path, dpi=150, bbox_inches='tight')
+        print(f"  Saved: {prepared_path}")
     
     plt.close(fig)
 
@@ -292,7 +335,7 @@ def plot_decisions_timber_vs_age(
         
         ax.set_xlabel('Stand age (years)', fontsize=11)
         ax.set_ylabel('Timber price ($/m³)', fontsize=11)
-        ax.set_title(f'{pc_label} carbon price (${pc_grid[i_pc]:.0f}/tCO₂)', 
+        ax.set_title(fr'{pc_label} carbon price (\${pc_grid[i_pc]:.0f}/tCO$_2$)', 
                      fontsize=12, fontweight='bold')
     
     # Add colorbar
@@ -305,8 +348,9 @@ def plot_decisions_timber_vs_age(
     plt.tight_layout(rect=[0, 0, 0.9, 1])
     
     if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"  Saved: {save_path}")
+        prepared_path = prepare_save_path(save_path)
+        plt.savefig(prepared_path, dpi=150, bbox_inches='tight')
+        print(f"  Saved: {prepared_path}")
     
     plt.close(fig)
 
@@ -365,7 +409,7 @@ def plot_decisions_carbon_vs_age(
         )
         
         ax.set_xlabel('Stand age (years)', fontsize=11)
-        ax.set_ylabel('Carbon price ($/tCO₂)', fontsize=11)
+        ax.set_ylabel(r'Carbon price (\$/tCO$_2$)', fontsize=11)
         ax.set_title(f'{pt_label} timber price (${pt_grid[i_pt]:.0f}/m³)', 
                      fontsize=12, fontweight='bold')
     
@@ -379,8 +423,9 @@ def plot_decisions_carbon_vs_age(
     plt.tight_layout(rect=[0, 0, 0.9, 1])
     
     if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"  Saved: {save_path}")
+        prepared_path = prepare_save_path(save_path)
+        plt.savefig(prepared_path, dpi=150, bbox_inches='tight')
+        print(f"  Saved: {prepared_path}")
     
     plt.close(fig)
 
@@ -452,7 +497,7 @@ def plot_simulation_trajectory(
     
     # --- Panel 1: Price Trajectories ---
     ax = axes[0]
-    ax.plot(years, data['carbon_price'], color='#3498db', linewidth=2, label='Carbon Price ($/tCO₂)')
+    ax.plot(years, data['carbon_price'], color='#3498db', linewidth=2, label=r'Carbon Price (\$/tCO$_2$)')
     ax.plot(years, data['timber_price'], color='#27ae60', linewidth=2, label='Timber Price ($/m³)')
     ax.set_ylabel('Price', fontsize=12)
     ax.set_title('Simulated price trajectories', fontsize=14, fontweight='bold')
@@ -536,7 +581,7 @@ def plot_simulation_trajectory(
     ax.scatter(years[regime_2_mask], data['carbon_stock'][regime_2_mask], 
                color='#8e44ad', s=20, label='Stock-change Regime')
 
-    ax.set_ylabel('Carbon stock (tCO₂/ha)', fontsize=12)
+    ax.set_ylabel(r'Carbon stock (tCO$_2$/ha)', fontsize=12)
     ax.set_title('Forest carbon stock', fontsize=14, fontweight='bold')
     ax.set_xlabel('Simulation year', fontsize=12)
     ax.legend(loc='upper right')
@@ -545,8 +590,9 @@ def plot_simulation_trajectory(
     plt.tight_layout()
     
     if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"\nTrajectory simulation saved to: {save_path}")
+        prepared_path = prepare_save_path(save_path)
+        plt.savefig(prepared_path, dpi=150, bbox_inches='tight')
+        print(f"\nTrajectory simulation saved to: {prepared_path}")
     
 
 def plot_trajectory_conference(
@@ -572,7 +618,7 @@ def plot_trajectory_conference(
     ax = axes[0]
     
     ax.plot(years, data['carbon_price'], color='#3498db', linewidth=2.5, 
-            label='Carbon Price ($/tCO₂)')
+            label=r'Carbon Price (\$/tCO$_2$)')
     ax.plot(years, data['timber_price'], color='#27ae60', linewidth=2.5, 
             label='Timber Price ($/m³)')
     
@@ -625,8 +671,9 @@ def plot_trajectory_conference(
     plt.tight_layout()
     
     if save_path:
-        plt.savefig(save_path, dpi=200, bbox_inches='tight', facecolor='white')
-        print(f"  Conference trajectory saved to: {save_path}")
+        prepared_path = prepare_save_path(save_path)
+        plt.savefig(prepared_path, dpi=200, bbox_inches='tight', facecolor='white')
+        print(f"  Conference trajectory saved to: {prepared_path}")
     
     plt.close(fig)
 
@@ -700,7 +747,7 @@ def plot_trajectory_revenue_conference(
     
     # ============ Top Panel: Price Trajectories ============
     ax0 = axes[0]
-    ax0.plot(years, data['carbon_price'], color='#3498db', linewidth=2.5, label='Carbon Price ($/tCO₂)')
+    ax0.plot(years, data['carbon_price'], color='#3498db', linewidth=2.5, label=r'Carbon Price (\$/tCO$_2$)')
     ax0.plot(years, data['timber_price'], color='#27ae60', linewidth=2.5, label='Timber Price ($/m³)')
     ax0.set_ylabel('Price', fontsize=14, fontweight='bold')
     ax0.set_title(f'Simulated price trajectories', fontsize=16, fontweight='bold', pad=10)
@@ -764,8 +811,9 @@ def plot_trajectory_revenue_conference(
     plt.tight_layout()
     
     if save_path:
-        plt.savefig(save_path, dpi=200, bbox_inches='tight', facecolor='white')
-        print(f"  Revenue trajectory saved to: {save_path}")
+        prepared_path = prepare_save_path(save_path)
+        plt.savefig(prepared_path, dpi=200, bbox_inches='tight', facecolor='white')
+        print(f"  Revenue trajectory saved to: {prepared_path}")
     
     plt.close(fig)
 
@@ -780,6 +828,7 @@ def plot_accounting_comparison(
     Shows Stock Change, Averaging, and Permanent regimes with a harvest at age 28.
     """
     # 1. Load data
+    configure_paper_style()
     try:
         df = pd.read_excel(excel_path, sheet_name='carbon table')
     except Exception as e:
@@ -851,45 +900,39 @@ def plot_accounting_comparison(
         stock_change[i] = current_acc
 
     # 4. Plotting
-    fig, ax = plt.subplots(figsize=(12, 7))
-    
-    # Style matches plot_utility_histograms:
-    # Averaging: Blue (#3498db)
-    # Permanent: Orange (#e67e22)
-    # Stock Change: Purple (#8e44ad)
-    ax.plot(ages, averaging_stock, color='#3498db', linewidth=3, label='Averaging', zorder=4)
-    ax.plot(ages, permanent_stock, color='#e67e22', linewidth=3, label='Permanent', zorder=2)
-    ax.plot(ages, stock_change, color='#8e44ad', linewidth=3, label='Stock change', zorder=3)
+    fig, ax = plt.subplots(figsize=(3.5, 2.9))
+    ax.plot(ages, averaging_stock, color=REGIME_COLORS['averaging'], linewidth=1.5, label='Averaging', zorder=4)
+    ax.plot(ages, permanent_stock, color=REGIME_COLORS['permanent'], linewidth=1.5, label='Permanent', zorder=2)
+    ax.plot(ages, stock_change, color=REGIME_COLORS['stock_change'], linewidth=1.5, label='Stock change', zorder=3)
     
     # Vertical line at assumed harvest
-    ax.axvline(x=harvest_age, color='black', linestyle='--', linewidth=1.5, alpha=0.6, zorder=1)
+    ax.axvline(x=harvest_age, color=LIGHT_GREY, linestyle='--', linewidth=0.8, alpha=1.0, zorder=1)
     
     # Annotation text
-    ax.text(harvest_age + 0.5, 800, 
-            'Assumed harvest at age 28\n(Stock change & averaging)',
-            fontsize=12, fontweight='bold', verticalalignment='top')
+    ax.text(
+        harvest_age + 0.8,
+        820,
+        'Assumed harvest\nat age 28',
+        fontsize=7,
+        verticalalignment='top',
+        color=TEXT_GREY,
+    )
     
     # Labels and titles
-    ax.set_xlabel('Forest age (years)', fontsize=14, fontweight='bold')
-    ax.set_ylabel('NZU accumulation (t CO₂e/ha)', fontsize=14, fontweight='bold')
-    ax.set_title('Carbon accounting under different regimes', fontsize=18, fontweight='bold', pad=15)
-    
-    ax.legend(loc='upper left', fontsize=16, framealpha=0.9)
-    ax.grid(True, alpha=0.3)
+    ax.set_xlabel('Forest age (years)')
+    ax.set_ylabel(r'NZU accumulation (t CO$_2$e per ha)')
+    ax.legend(loc='upper left', frameon=False)
     ax.set_xlim(0, max_plot_age)
     ax.set_ylim(0, None)
-    
-    # Tick adjustments
-    ax.tick_params(axis='both', labelsize=12)
-    
-    plt.tight_layout()
+    style_axes(ax)
+    fig.subplots_adjust(left=0.18, right=0.98, top=0.98, bottom=0.18)
     
     if save_path:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=200, bbox_inches='tight')
-        print(f"  Accounting comparison plot saved to: {save_path}")
-    
-    plt.close(fig)
+        prepared_path = prepare_save_path(save_path)
+        save_figure(fig, prepared_path)
+        print(f"  Accounting comparison plot saved to: {prepared_path}")
+    else:
+        plt.close(fig)
 
 
 def macro_impact(
@@ -960,9 +1003,9 @@ def macro_impact(
     plt.tight_layout()
 
     if save_path:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"  Macro impact plot saved to: {save_path}")
+        prepared_path = prepare_save_path(save_path)
+        plt.savefig(prepared_path, dpi=150, bbox_inches='tight')
+        print(f"  Macro impact plot saved to: {prepared_path}")
     
     plt.close(fig)
 
@@ -978,14 +1021,14 @@ def plot_value_function(
     """
     Plot value function by age for different price states.
     """
+    configure_paper_style()
     pc_grid = price_data['pc_grid']
-    pt_grid = price_data['pt_grid']
     
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(3.5, 2.8))
     
     # Plot for regime=0, rotation=1, varying carbon price
     mid_pt = params.N_pt // 2
-    colors = plt.cm.viridis(np.linspace(0, 1, params.N_pc))
+    colors = plt.cm.Blues(np.linspace(0.35, 0.95, params.N_pc))
     
     plot_ages = min(max_age_plot + 1, params.N_a)
     
@@ -998,38 +1041,52 @@ def plot_value_function(
         
         ax.plot(range(plot_ages), values_by_age, 
                 color=colors[i_pc], 
-                label=f'P_c = ${pc_grid[i_pc]:.0f}',
-                linewidth=2)
+                label=f'${pc_grid[i_pc]:.0f}',
+                linewidth=1.0)
     
-    ax.set_xlabel('Stand age (years)', fontsize=12)
-    ax.set_ylabel('Value ($)', fontsize=12)
-    ax.set_title('Value function by age\n(averaging regime, first rotation, median timber price)',
-                 fontsize=13, fontweight='bold')
-    ax.legend(title='Carbon Price', loc='upper left')
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
+    ax.set_xlabel('Stand age (years)')
+    ax.set_ylabel('Value ($ per ha)')
+    ax.legend(title='Carbon price', loc='upper left', frameon=False, ncol=2)
+    style_axes(ax)
+    fig.subplots_adjust(left=0.18, right=0.98, top=0.98, bottom=0.18)
     
     if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"\nPlot saved to: {save_path}")
+        prepared_path = prepare_save_path(save_path)
+        save_figure(fig, prepared_path)
+        print(f"\nPlot saved to: {prepared_path}")
+    else:
+        plt.close(fig)
     
 
-def main():
+def main(args=None):
     parser = argparse.ArgumentParser(description="Generate plots for Harvest Timing Model")
     parser.add_argument('--temp-dir', type=str, default='baseline',
                         help='Directory containing the pickle file (default: baseline)')
+    parser.add_argument(
+        '--grid-size',
+        type=int,
+        default=DEFAULT_PRICE_GRID_SIZE,
+        help=f'Grid size used to resolve the default pickle path (default: {DEFAULT_PRICE_GRID_SIZE})',
+    )
     parser.add_argument('--pickle-path', type=str, default=None,
                         help='Full path to the pickle file (overrides --temp-dir)')
-    parser.add_argument('--output-dir', type=str, default='plots',
-                        help='Directory to save plots')
-    args = parser.parse_args()
+    parser.add_argument('--output-dir', type=str, default=None,
+                        help='Directory to save plots (defaults to a grid-specific plots path)')
+    if args is None:
+        args = parser.parse_args()
     
+    temp_dir = getattr(args, 'temp_dir', 'baseline')
+    grid_size = getattr(args, 'grid_size', DEFAULT_PRICE_GRID_SIZE)
+    output_dir_arg = getattr(args, 'output_dir', None)
+    pickle_path_arg = getattr(args, 'pickle_path', None)
+
     # Determine pickle path
-    if args.pickle_path is None:
-        pickle_path = os.path.join('outputs', args.temp_dir, 'model_results.pkl')
+    if pickle_path_arg is None:
+        pickle_path = model_results_path(temp_dir, grid_size)
+        expected_grid_size = grid_size
     else:
-        pickle_path = args.pickle_path
+        pickle_path = pickle_path_arg
+        expected_grid_size = None
     
     if not os.path.exists(pickle_path):
         print(f"Error: Pickle file not found at {pickle_path}")
@@ -1037,8 +1094,11 @@ def main():
         return
 
     print(f"Loading results from {pickle_path}...")
-    with open(pickle_path, 'rb') as f:
-        results = pickle.load(f)
+    try:
+        results = load_results_pickle(pickle_path, expected_grid_size=expected_grid_size)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return
     
     params = results['params']
     state_space = results['state_space']
@@ -1046,11 +1106,14 @@ def main():
     V = results['V']
     sigma = results['sigma']
     sim_data = results.get('sim_data')  # May not exist
+    default_run_name = temp_dir if pickle_path_arg is None else infer_run_name_from_pickle_path(pickle_path)
+    run_name = get_results_run_name(results, default=default_run_name)
+    output_dir = output_dir_arg or plot_output_dir(run_name, params.N_pc)
     
     print("\n--- Generating Visualizations ---")
     
     # Ensure plots directory exists
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
     
     # Rebuild R and Q matrices needed for simulation
     print("\n--- Rebuilding Reward and Transition Matrices ---")
@@ -1066,14 +1129,14 @@ def main():
     
     # Price paths
     plot_price_paths(params, n_paths=1000, n_periods=51, 
-                    save_path=os.path.join(args.output_dir, 'price_paths.png'))
+                    save_path=os.path.join(output_dir, 'price_paths.png'))
     
     # Accounting comparison (new)
     print("\n--- Generating Accounting Comparison Plot ---")
     plot_accounting_comparison(
         excel_path='data/growth_curves.xlsx',
         params=params,
-        save_path=os.path.join(args.output_dir, 'accounting_comparison.png')
+        save_path=os.path.join(output_dir, 'accounting_comparison.png')
     )
     
     # Generate all 9 decision plots (3 states × 3 plot types)
@@ -1135,7 +1198,7 @@ def main():
     plot_trajectory_conference(
         sim_data_averaging, params,
         regime_label='averaging accounting',
-        save_path=os.path.join(args.output_dir, 'conference_averaging.png')
+        save_path=os.path.join(output_dir, 'conference_averaging.png')
     )
     
     macro_impact(
@@ -1143,11 +1206,10 @@ def main():
         delta_npv_sc_28=-2481,
         delta_npv_sc_bank=-6653,
         new_planting_ha_per_year=53400,
-        save_path='plots/macro_impact.png'
+        save_path=os.path.join(output_dir, 'macro_impact.png')
     )
 
     print("\nAll plots generated successfully.")
 
 if __name__ == "__main__":
     main()
-
