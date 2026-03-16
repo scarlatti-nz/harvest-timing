@@ -15,6 +15,8 @@ Regimes:
 """
 
 import numpy as np
+import scipy.sparse as sp
+import scipy.sparse.linalg as spla
 from quantecon.markov import tauchen, DiscreteDP
 from dataclasses import dataclass, field, asdict
 from typing import Tuple, Dict, Optional
@@ -612,8 +614,6 @@ def build_transition_matrix(
         s_indices: Array of shape (L,) giving the state index for each SA row
         a_indices: Array of shape (L,) giving the action index for each SA row
     """
-    import scipy.sparse as sp
-
     n = state_space.N_states
     m = N_ACTIONS
     L = n * m
@@ -711,6 +711,363 @@ def build_transition_matrix(
 # 8. Solve DP Model
 # =============================================================================
 
+LARGE_SPARSE_POLICY_ITERATION_STATE_THRESHOLD = 150_000
+SPARSE_POLICY_EVAL_RTOL = 1e-8
+SPARSE_POLICY_EVAL_MAXITER = 1_000
+SPARSE_POLICY_EVAL_GMRES_RESTART = 50
+MATRIX_FREE_TRANSITION_TEMP_BYTES_THRESHOLD = int(2.4 * 1024**3)
+
+
+def estimate_transition_nnz(params: ModelParameters) -> int:
+    n_states = params.N_a * params.N_pc * params.N_pt * params.N_regimes * params.N_rotations
+    return n_states * N_ACTIONS * params.N_pc * params.N_pt
+
+
+def estimate_transition_triplet_bytes(params: ModelParameters) -> int:
+    # Explicit Q construction allocates rows(int32), cols(int32), and data(float32)
+    # before converting to CSR.
+    return estimate_transition_nnz(params) * (4 + 4 + 4)
+
+
+def should_use_matrix_free_solver(params: ModelParameters) -> bool:
+    return estimate_transition_triplet_bytes(params) >= MATRIX_FREE_TRANSITION_TEMP_BYTES_THRESHOLD
+
+
+class MatrixFreeTransitionModel:
+    """Matrix-free transition operator for large price grids."""
+
+    def __init__(self, params: ModelParameters, price_data: Dict):
+        self.params = params
+        self.Pc = np.asarray(price_data['Pc'], dtype=np.float64)
+        self.Pt = np.asarray(price_data['Pt'], dtype=np.float64)
+        self.Pt_T = self.Pt.T
+        self.state_shape = (
+            params.N_a,
+            params.N_pc,
+            params.N_pt,
+            params.N_regimes,
+            params.N_rotations,
+        )
+        self.action_shape = self.state_shape + (N_ACTIONS,)
+        self.price_stay = np.diag(self.Pc)[:, None] * np.diag(self.Pt)[None, :]
+
+    def _state_view(self, values: np.ndarray) -> np.ndarray:
+        return np.asarray(values, dtype=np.float64).reshape(self.state_shape)
+
+    def _action_view(self, values: np.ndarray) -> np.ndarray:
+        return np.asarray(values, dtype=np.float64).reshape(self.action_shape)
+
+    def _expected_price_continuation(self, next_state_values: np.ndarray) -> np.ndarray:
+        return self.Pc @ next_state_values @ self.Pt_T
+
+    def action_continuations(self, values: np.ndarray) -> np.ndarray:
+        values_state = self._state_view(values)
+        out = np.empty(self.action_shape, dtype=np.float64)
+
+        harvest_cache = [
+            self._expected_price_continuation(values_state[0, :, :, regime, 1])
+            for regime in range(self.params.N_regimes)
+        ]
+
+        for age in range(self.params.N_a):
+            next_age = min(age + 1, self.params.A_max)
+            for regime in range(self.params.N_regimes):
+                for rotation_idx in range(self.params.N_rotations):
+                    hold = self._expected_price_continuation(
+                        values_state[next_age, :, :, regime, rotation_idx]
+                    )
+                    out[age, :, :, regime, rotation_idx, ACTION_DO_NOTHING] = hold
+                    out[age, :, :, regime, rotation_idx, ACTION_HARVEST_REPLANT] = harvest_cache[regime]
+                    if regime == 0:
+                        out[age, :, :, regime, rotation_idx, ACTION_SWITCH_PERMANENT] = (
+                            self._expected_price_continuation(
+                                values_state[next_age, :, :, 1, rotation_idx]
+                            )
+                        )
+                    else:
+                        out[age, :, :, regime, rotation_idx, ACTION_SWITCH_PERMANENT] = hold
+
+        return out
+
+    def greedy(self, rewards: np.ndarray, beta: float, values: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        action_values = self._action_view(rewards) + beta * self.action_continuations(values)
+        sigma = np.argmax(action_values, axis=-1).astype(np.int64)
+        greedy_values = np.take_along_axis(action_values, sigma[..., None], axis=-1)[..., 0]
+        return greedy_values.reshape(-1), sigma.reshape(-1)
+
+    def policy_reward(self, rewards: np.ndarray, sigma: np.ndarray) -> np.ndarray:
+        reward_tensor = self._action_view(rewards)
+        sigma_tensor = sigma.reshape(self.state_shape)
+        policy_reward = np.take_along_axis(reward_tensor, sigma_tensor[..., None], axis=-1)[..., 0]
+        return policy_reward.reshape(-1)
+
+    def policy_transition(self, sigma: np.ndarray, values: np.ndarray) -> np.ndarray:
+        continuations = self.action_continuations(values)
+        sigma_tensor = sigma.reshape(self.state_shape)
+        expected_values = np.take_along_axis(continuations, sigma_tensor[..., None], axis=-1)[..., 0]
+        return expected_values.reshape(-1)
+
+    def policy_diagonal(self, sigma: np.ndarray, beta: float) -> np.ndarray:
+        sigma_tensor = sigma.reshape(self.state_shape)
+        diag = np.ones(self.state_shape, dtype=np.float64)
+
+        for age in range(self.params.N_a):
+            for regime in range(self.params.N_regimes):
+                for rotation_idx in range(self.params.N_rotations):
+                    stay_prob = np.zeros((self.params.N_pc, self.params.N_pt), dtype=np.float64)
+
+                    if age == self.params.A_max:
+                        stay_prob = np.where(
+                            sigma_tensor[age, :, :, regime, rotation_idx] == ACTION_DO_NOTHING,
+                            self.price_stay,
+                            stay_prob,
+                        )
+                        if regime != 0:
+                            stay_prob = np.where(
+                                sigma_tensor[age, :, :, regime, rotation_idx] == ACTION_SWITCH_PERMANENT,
+                                self.price_stay,
+                                stay_prob,
+                            )
+
+                    if age == 0 and rotation_idx == 1:
+                        stay_prob = np.where(
+                            sigma_tensor[age, :, :, regime, rotation_idx] == ACTION_HARVEST_REPLANT,
+                            self.price_stay,
+                            stay_prob,
+                        )
+
+                    diag[age, :, :, regime, rotation_idx] -= beta * stay_prob
+
+        return diag.reshape(-1)
+
+    def expected_continuation_single(
+        self,
+        values: np.ndarray,
+        state_tuple: Tuple[int, int, int, int, int],
+        action: int,
+    ) -> float:
+        age, i_pc, i_pt, regime, rotation = state_tuple
+        rotation_idx = rotation - 1
+
+        if action == ACTION_DO_NOTHING:
+            next_age = min(age + 1, self.params.A_max)
+            next_regime = regime
+            next_rotation_idx = rotation_idx
+        elif action == ACTION_HARVEST_REPLANT:
+            next_age = 0
+            next_regime = regime
+            next_rotation_idx = 1
+        elif regime == 0:
+            next_age = min(age + 1, self.params.A_max)
+            next_regime = 1
+            next_rotation_idx = rotation_idx
+        else:
+            next_age = min(age + 1, self.params.A_max)
+            next_regime = regime
+            next_rotation_idx = rotation_idx
+
+        values_state = self._state_view(values)
+        next_slice = values_state[next_age, :, :, next_regime, next_rotation_idx]
+        return float(self.Pc[i_pc].dot(next_slice).dot(self.Pt[i_pt]))
+
+
+def build_transition_representation(
+    params: ModelParameters,
+    state_space: StateSpace,
+    price_data: Dict,
+) -> Tuple[object, Optional[np.ndarray], Optional[np.ndarray], bool]:
+    if should_use_matrix_free_solver(params):
+        transition = MatrixFreeTransitionModel(params, price_data)
+        return transition, None, None, True
+
+    Q_sa, s_indices, a_indices = build_transition_matrix(params, state_space, price_data)
+    return Q_sa, s_indices, a_indices, False
+
+
+def _diagonal_preconditioner(A: sp.spmatrix) -> spla.LinearOperator:
+    diag = np.asarray(A.diagonal()).ravel()
+    if np.any(np.isclose(diag, 0.0)):
+        raise RuntimeError(
+            "Sparse policy evaluation matrix has a zero diagonal; cannot build "
+            "the diagonal preconditioner."
+        )
+
+    inv_diag = np.reciprocal(diag)
+    return spla.LinearOperator(
+        A.shape,
+        matvec=lambda x: inv_diag * x,
+        dtype=A.dtype,
+    )
+
+
+def _solve_sparse_policy_evaluation_iterative(
+    A: sp.spmatrix,
+    b: np.ndarray,
+) -> np.ndarray:
+    preconditioner = _diagonal_preconditioner(A)
+
+    x, info = spla.bicgstab(
+        A,
+        b,
+        rtol=SPARSE_POLICY_EVAL_RTOL,
+        atol=0.0,
+        maxiter=SPARSE_POLICY_EVAL_MAXITER,
+        M=preconditioner,
+    )
+    if info == 0:
+        return x
+
+    x, info = spla.gmres(
+        A,
+        b,
+        restart=SPARSE_POLICY_EVAL_GMRES_RESTART,
+        rtol=SPARSE_POLICY_EVAL_RTOL,
+        atol=0.0,
+        maxiter=SPARSE_POLICY_EVAL_MAXITER,
+        M=preconditioner,
+    )
+    if info == 0:
+        return x
+
+    if info > 0:
+        raise RuntimeError(
+            "Iterative sparse policy evaluation did not converge within "
+            f"{info} iterations."
+        )
+
+    raise RuntimeError(
+        "Iterative sparse policy evaluation failed due to an illegal input or "
+        "solver breakdown."
+    )
+
+
+def _solve_linear_operator_iterative(
+    operator: spla.LinearOperator,
+    b: np.ndarray,
+    diagonal: np.ndarray,
+) -> np.ndarray:
+    preconditioner = spla.LinearOperator(
+        operator.shape,
+        matvec=lambda x: x / diagonal,
+        dtype=operator.dtype,
+    )
+
+    x, info = spla.bicgstab(
+        operator,
+        b,
+        rtol=SPARSE_POLICY_EVAL_RTOL,
+        atol=0.0,
+        maxiter=SPARSE_POLICY_EVAL_MAXITER,
+        M=preconditioner,
+    )
+    if info == 0:
+        return x
+
+    x, info = spla.gmres(
+        operator,
+        b,
+        restart=SPARSE_POLICY_EVAL_GMRES_RESTART,
+        rtol=SPARSE_POLICY_EVAL_RTOL,
+        atol=0.0,
+        maxiter=SPARSE_POLICY_EVAL_MAXITER,
+        M=preconditioner,
+    )
+    if info == 0:
+        return x
+
+    if info > 0:
+        raise RuntimeError(
+            "Iterative linear solve did not converge within "
+            f"{info} iterations."
+        )
+
+    raise RuntimeError("Iterative linear solve failed due to solver breakdown.")
+
+
+def _evaluate_matrix_free_policy(
+    rewards: np.ndarray,
+    transition_model: MatrixFreeTransitionModel,
+    beta: float,
+    sigma: np.ndarray,
+) -> np.ndarray:
+    reward_sigma = transition_model.policy_reward(rewards, sigma).astype(np.float64)
+    diagonal = transition_model.policy_diagonal(sigma, beta)
+    operator = spla.LinearOperator(
+        (rewards.shape[0], rewards.shape[0]),
+        matvec=lambda x: x - beta * transition_model.policy_transition(sigma, x),
+        dtype=np.float64,
+    )
+    return _solve_linear_operator_iterative(operator, reward_sigma, diagonal)
+
+
+def _configure_sparse_policy_evaluation_solver(ddp: DiscreteDP) -> None:
+    if not getattr(ddp, "_sparse", False):
+        return
+
+    direct_lineq_solve = ddp._lineq_solve
+    prefer_iterative = ddp.num_states >= LARGE_SPARSE_POLICY_ITERATION_STATE_THRESHOLD
+    warned = False
+
+    def robust_lineq_solve(A, b):
+        nonlocal prefer_iterative, warned
+
+        # SuperLU factorization starts failing around the 22x22 / 23x23 grids in
+        # this model even when the host still has plenty of RAM available.
+        if prefer_iterative:
+            if not warned:
+                warnings.warn(
+                    "Using iterative sparse policy evaluation to avoid SuperLU "
+                    "memory failures on this large state space."
+                )
+                warned = True
+            return _solve_sparse_policy_evaluation_iterative(A, b)
+
+        try:
+            return direct_lineq_solve(A, b)
+        except MemoryError:
+            prefer_iterative = True
+            if not warned:
+                warnings.warn(
+                    "Sparse direct policy evaluation ran out of memory; "
+                    "falling back to iterative bicgstab/gmres."
+                )
+                warned = True
+            return _solve_sparse_policy_evaluation_iterative(A, b)
+
+    ddp._lineq_solve = robust_lineq_solve
+
+
+def solve_model_matrix_free(
+    rewards: np.ndarray,
+    transition_model: MatrixFreeTransitionModel,
+    beta: float,
+    max_iter: int = 250,
+) -> Tuple[np.ndarray, np.ndarray]:
+    if beta == 1:
+        raise NotImplementedError("Matrix-free policy iteration does not support beta=1.")
+
+    n_states = rewards.shape[0]
+    values = rewards.max(axis=1).astype(np.float64)
+    _, sigma = transition_model.greedy(rewards, beta, values)
+    new_sigma = np.empty(n_states, dtype=np.int64)
+
+    for iteration in range(max_iter):
+        values_sigma = _evaluate_matrix_free_policy(rewards, transition_model, beta, sigma)
+        _, new_sigma = transition_model.greedy(rewards, beta, values_sigma)
+        if np.array_equal(new_sigma, sigma):
+            return values_sigma, sigma
+        if iteration == max_iter - 1:
+            warnings.warn("Matrix-free policy iteration reached max_iter without converging.")
+            values_new_sigma = _evaluate_matrix_free_policy(
+                rewards,
+                transition_model,
+                beta,
+                new_sigma,
+            )
+            return values_new_sigma, new_sigma
+        sigma[:] = new_sigma
+
+
 def solve_model(
     R: np.ndarray,
     Q,
@@ -733,6 +1090,7 @@ def solve_model(
         # row = s * N_ACTIONS + a
         R_sa = np.asarray(R, dtype=np.float32).reshape(-1)
         ddp = DiscreteDP(R_sa, Q, beta, s_indices, a_indices)
+        _configure_sparse_policy_evaluation_solver(ddp)
     else:
         # Dense product formulation (only feasible for small problems)
         Q_transposed = np.transpose(Q, (1, 0, 2))
@@ -975,9 +1333,10 @@ def simulate_single_trajectory(
             
             # Expected continuation value
             expected_v = None
+            if hasattr(Q, 'expected_continuation_single'):
+                expected_v = Q.expected_continuation_single(V, state_tuple, a)
             try:
-                import scipy.sparse as sp
-                if sp.issparse(Q):
+                if expected_v is None and sp.issparse(Q):
                     row = s * N_ACTIONS + a
                     expected_v = float(np.asarray(Q[row].dot(V)).reshape(-1)[0])
             except Exception:
@@ -1169,15 +1528,36 @@ def main(args=None, params=None):
     print(f"  Saved labeled reward matrix to reward_matrix.csv")
     print(f"  Shape: {R.shape}")
     
-    # Build transition matrix
-    print("\n--- Building Transition Matrix ---")
-    Q_sa, s_indices, a_indices = build_transition_matrix(params, state_space, price_data)
-    print(f"  Shape (SA-form): {Q_sa.shape}")
+    use_matrix_free = should_use_matrix_free_solver(params)
+    Q = None
+
+    if use_matrix_free:
+        print("\n--- Transition Representation ---")
+        print("  Using matrix-free transition operator")
+        print(f"  Estimated SA-form non-zeros skipped: {estimate_transition_nnz(params):,}")
+    else:
+        print("\n--- Building Transition Matrix ---")
+
+    Q, s_indices, a_indices, used_matrix_free = build_transition_representation(
+        params, state_space, price_data
+    )
+    if not used_matrix_free:
+        print(f"  Shape (SA-form): {Q.shape}")
     
     # Solve
     print("\n--- Solving DP (Infinite Horizon) ---")
     start_time = time.time()
-    V, sigma = solve_model(R, Q_sa, params.beta, method='policy_iteration', s_indices=s_indices, a_indices=a_indices)
+    if used_matrix_free:
+        V, sigma = solve_model_matrix_free(R, Q, params.beta)
+    else:
+        V, sigma = solve_model(
+            R,
+            Q,
+            params.beta,
+            method='policy_iteration',
+            s_indices=s_indices,
+            a_indices=a_indices,
+        )
     end_time = time.time()
     print(f"  Time taken: {end_time - start_time:.2f} seconds")
     print("  ✓ Solution found")
@@ -1193,7 +1573,7 @@ def main(args=None, params=None):
     # Simulate single trajectory (analysis)
     print("\n--- Simulating Optimal Trajectory ---")
     sim_data = simulate_single_trajectory(
-        params, state_space, price_data, R, Q_sa, V, sigma, C_age,
+        params, state_space, price_data, R, Q, V, sigma, C_age,
         n_years=50, seed=42
     )
 

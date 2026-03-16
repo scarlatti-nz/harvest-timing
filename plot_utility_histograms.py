@@ -18,7 +18,8 @@ from harvest_timing_model import (
     ModelParameters, StateSpace, simulate_single_trajectory,
     compute_carbon_curve, compute_volume_from_carbon,
     compute_carbon_flows_averaging, compute_carbon_flows_permanent,
-    compute_price_quality_factor, build_reward_matrix, build_transition_matrix,
+    compute_price_quality_factor, build_reward_matrix, build_transition_representation,
+    estimate_transition_nnz,
     ACTION_DO_NOTHING, ACTION_HARVEST_REPLANT, ACTION_SWITCH_PERMANENT, N_ACTIONS
 )
 from grid_config import (
@@ -400,7 +401,12 @@ def main(args=None):
         price_quality_factor = compute_price_quality_factor(params)
         
         R = build_reward_matrix(params, state_space, price_data, V_age, C_age, DeltaC_avg, DeltaC_perm, price_quality_factor)
-        Q_sa, _, _ = build_transition_matrix(params, state_space, price_data)
+        Q, _, _, used_matrix_free = build_transition_representation(params, state_space, price_data)
+        if used_matrix_free:
+            print(
+                "  Using matrix-free transition representation "
+                f"(skipping {estimate_transition_nnz(params):,} explicit non-zeros)"
+            )
         reward_components = build_reward_components(params, state_space, price_data, V_age, C_age, DeltaC_avg, DeltaC_perm, price_quality_factor)
         
         npvs, carbon_npvs, timber_npvs, harvest_ages, avg_pc, avg_pt = run_simulations(
@@ -410,7 +416,7 @@ def main(args=None):
             params=params,
             state_space=state_space,
             price_data=price_data,
-            R=R, Q=Q_sa, V=V, sigma=sigma, C_age=C_age,
+            R=R, Q=Q, V=V, sigma=sigma, C_age=C_age,
             reward_components=reward_components,
             n_years=N_YEARS
         )

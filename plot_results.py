@@ -36,7 +36,8 @@ from harvest_timing_model import (
     compute_carbon_flows_permanent,
     compute_price_quality_factor,
     build_reward_matrix,
-    build_transition_matrix,
+    build_transition_representation,
+    estimate_transition_nnz,
     ACTION_DO_NOTHING,
     ACTION_HARVEST_REPLANT,
     ACTION_SWITCH_PERMANENT
@@ -1200,7 +1201,12 @@ def main(args=None):
     price_quality_factor = compute_price_quality_factor(params)
     
     R = build_reward_matrix(params, state_space, price_data, V_age, C_age, DeltaC_avg, DeltaC_perm, price_quality_factor)
-    Q_sa, _, _ = build_transition_matrix(params, state_space, price_data)
+    Q, _, _, used_matrix_free = build_transition_representation(params, state_space, price_data)
+    if used_matrix_free:
+        print(
+            "  Using matrix-free transition representation "
+            f"(skipping {estimate_transition_nnz(params):,} explicit non-zeros)"
+        )
     print("  ✓ Matrices rebuilt")
     
     # Price paths
@@ -1262,7 +1268,7 @@ def main(args=None):
     # Regime 0: Averaging
     print("  Simulating Averaging regime (regime=0)...")
     sim_data_averaging = simulate_single_trajectory(
-        params, state_space, price_data, R, Q_sa, V, sigma, C_age,
+        params, state_space, price_data, R, Q, V, sigma, C_age,
         n_years=n_conference_years,
         seed=conference_seed,
         carbon_prices=carbon_prices_shared.copy(),
