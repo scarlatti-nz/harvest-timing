@@ -910,10 +910,12 @@ def plot_accounting_comparison(
     
     # Annotation text
     ax.text(
-        harvest_age + 0.8,
-        820,
+        harvest_age - 1.25,
+        1500,
         'Assumed harvest\nat age 28',
         fontsize=7,
+        horizontalalignment='right',
+        multialignment='right',
         verticalalignment='top',
         color=TEXT_GREY,
     )
@@ -921,7 +923,81 @@ def plot_accounting_comparison(
     # Labels and titles
     ax.set_xlabel('Forest age (years)')
     ax.set_ylabel(r'NZU accumulation (t CO$_2$e per ha)')
-    ax.legend(loc='upper left', frameon=False)
+    
+    # Inline labels instead of legend
+    label_x = max_plot_age - 2
+    permanent_label_x = 44.2
+    permanent_label_y = 1690
+    permanent_target_x = 46.3
+    permanent_target_y = np.interp(permanent_target_x, ages, permanent_stock)
+
+    averaging_label_x = 48.0
+    averaging_label_y = 395
+    averaging_target_x = 48.0
+    averaging_target_y = np.interp(averaging_target_x, ages, averaging_stock)
+
+    stock_change_label_x = 43.5
+    stock_change_label_y = 805
+    stock_change_target_x = 47.0
+    stock_change_target_y = np.interp(stock_change_target_x, ages, stock_change)
+
+    # Start connectors just outside the text block rather than through label centres.
+    ax.plot(
+        [permanent_label_x + 1.5, permanent_target_x],
+        [permanent_label_y - 34, permanent_target_y],
+        color=REGIME_COLORS['permanent'],
+        linewidth=0.9,
+        solid_capstyle='round',
+        zorder=4.5,
+    )
+    ax.plot(
+        [averaging_label_x, averaging_target_x],
+        [averaging_label_y + 34, averaging_target_y],
+        color=REGIME_COLORS['averaging'],
+        linewidth=0.9,
+        solid_capstyle='round',
+        zorder=4.5,
+    )
+    ax.plot(
+        [stock_change_label_x + 2.1, stock_change_target_x],
+        [stock_change_label_y - 34, stock_change_target_y],
+        color=REGIME_COLORS['stock_change'],
+        linewidth=0.9,
+        solid_capstyle='round',
+        zorder=4.5,
+    )
+
+    ax.text(
+        permanent_label_x,
+        permanent_label_y,
+        'Permanent',
+        color=REGIME_COLORS['permanent'],
+        fontsize=8,
+        ha='center',
+        va='center',
+        zorder=5,
+    )
+    ax.text(
+        averaging_label_x,
+        averaging_label_y,
+        'Averaging',
+        color=REGIME_COLORS['averaging'],
+        fontsize=8,
+        ha='center',
+        va='center',
+        zorder=5,
+    )
+    ax.text(
+        stock_change_label_x,
+        stock_change_label_y,
+        'Stock change',
+        color=REGIME_COLORS['stock_change'],
+        fontsize=8,
+        ha='center',
+        va='center',
+        zorder=5,
+    )
+            
     ax.set_xlim(0, max_plot_age)
     ax.set_ylim(0, None)
     style_axes(ax)
