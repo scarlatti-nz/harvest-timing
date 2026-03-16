@@ -46,6 +46,7 @@ from harvest_timing_model import (
 from paper_style import (
     ACTION_COLOR_LIST,
     LIGHT_GREY,
+    TEXT_BLACK,
     TEXT_GREY,
     add_action_legend,
     add_panel_condition,
@@ -67,6 +68,8 @@ TIMBER_SLICE_LABELS = ["Low timber price", "Median timber price", "High timber p
 PANEL_LABELS_2X2 = ["a", "b", "c", "d"]
 PANEL_LABELS_1X3 = ["a", "b", "c"]
 MAIN_PHASE_DIAGRAM_AGES = [10, 16, 22, 30]
+TIMBER_PRICE_MIN = 100.0
+TIMBER_PRICE_MAX = 220.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -284,10 +287,17 @@ def plot_phase_diagram_panels(
 ) -> None:
     pt_grid = price_data["pt_grid"]
     pc_grid = price_data["pc_grid"]
-    pt_edges = grid_edges(pt_grid)
     pc_edges = grid_edges(pc_grid)
     cmap = mcolors.ListedColormap(PLOT_COLORS)
     norm = mcolors.BoundaryNorm([-0.5, 0.5, 1.5, 2.5], cmap.N)
+    timber_mask = (pt_grid >= TIMBER_PRICE_MIN) & (pt_grid <= TIMBER_PRICE_MAX)
+    if not timber_mask.any():
+        timber_mask = np.ones_like(pt_grid, dtype=bool)
+
+    pt_grid_for_plot = pt_grid[timber_mask]
+    pt_edges_for_plot = grid_edges(pt_grid_for_plot)
+    pt_edges_for_plot[0] = TIMBER_PRICE_MIN
+    pt_edges_for_plot[-1] = TIMBER_PRICE_MAX
 
     fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.6), sharex=True, sharey=True)
     for ax, age, panel_label in zip(axes.flatten(), ages, PANEL_LABELS_2X2):
@@ -295,10 +305,15 @@ def plot_phase_diagram_panels(
         matrix = price_phase_matrix(
             sigma, state_space, params, clamped_age, regime=regime, rotation=rotation
         )
+        matrix_for_plot = matrix[:, timber_mask]
+        if matrix_for_plot.size == 0:
+            matrix_for_plot = matrix
+        matrix_for_plot = np.vstack((matrix_for_plot[:1, :], matrix_for_plot))
+        pc_edges_for_plot = np.concatenate(([0.0], pc_edges))
         ax.pcolormesh(
-            pt_edges,
-            pc_edges,
-            matrix,
+            pt_edges_for_plot,
+            pc_edges_for_plot,
+            matrix_for_plot,
             cmap=cmap,
             norm=norm,
             shading="flat",
@@ -307,12 +322,27 @@ def plot_phase_diagram_panels(
             linewidth=0.0,
             rasterized=True,
         )
-        draw_action_boundaries(ax, pt_edges, pc_edges, matrix)
+        draw_action_boundaries(ax, pt_edges_for_plot, pc_edges_for_plot, matrix_for_plot)
         add_panel_label(ax, panel_label)
         if panel_title_prefix is None:
             add_panel_condition(ax, f"{clamped_age} years")
         else:
             ax.set_title(f"{panel_title_prefix}: {clamped_age} years", loc="left", pad=4)
+        if panel_label == "a":
+            ax.text(
+                0.5,
+                0.5,
+                "Always hold",
+                transform=ax.transAxes,
+                ha="center",
+                va="center",
+                fontsize=9,
+                color=TEXT_BLACK,
+            )
+        ax.set_ylim(0, 150)
+        ax.set_yticks(np.arange(0, 151, 25))
+        ax.set_xlim(TIMBER_PRICE_MIN, TIMBER_PRICE_MAX)
+        ax.set_xticks(np.arange(TIMBER_PRICE_MIN, TIMBER_PRICE_MAX + 1, 20))
         ax.set_xlabel("Timber price ($ per m³)")
         ax.set_ylabel(r"Carbon price (\$ per tCO$_2$)")
         style_axes(ax)

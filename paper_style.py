@@ -107,7 +107,7 @@ def add_panel_label(ax: plt.Axes, label: str) -> None:
         1.03,
         label,
         transform=ax.transAxes,
-        fontsize=8,
+        fontsize=10,
         fontweight="bold",
         ha="left",
         va="bottom",
