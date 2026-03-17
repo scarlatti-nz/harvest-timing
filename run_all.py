@@ -1,131 +1,165 @@
 """
-Script to run multiple model scenarios by overriding parameters.
+Config-driven runner for the canonical scenario bundle.
 """
 
+from __future__ import annotations
+
 import argparse
-from harvest_timing_model import main as run_model
-from harvest_timing_model import ModelParameters
-from plot_utility_histograms import main as plot_utility_histograms
+import os
 from argparse import Namespace
+
+from grid_config import model_results_path
+from harvest_timing_model import ModelParameters
+from harvest_timing_model import main as run_model
 from plot_results import main as plot_results
-from grid_config import DEFAULT_PRICE_GRID_SIZE
+from plot_utility_histograms import main as plot_utility_histograms
+from run_all_config import (
+    DEFAULT_RUN_ALL_CONFIG_PATH,
+    ModelRunJob,
+    PlotJob,
+    RunAllConfig,
+    UtilityJob,
+    describe_run_all_config,
+    load_run_all_config,
+)
+from scenario_registry import get_model_scenario, get_utility_scenarios
 
-class MockArgs:
-    def __init__(self, temp_dir='temp', grid_size=DEFAULT_PRICE_GRID_SIZE):
-        self.temp_dir = temp_dir
-        self.grid_size = grid_size
-        self.sanity_checks = False
 
-def run_scenarios(grid_size=DEFAULT_PRICE_GRID_SIZE):
-    scenarios = [
-        {
-            'name': 'baseline',
-            # switch_cost 1e9 forces you to stay in averaging regime, high harvest penalty forces permanent regime not to harvest
-            'overrides': {
-                'switch_cost': 1e9,
-                'harvest_penalty_per_m3': 10000.0
-            }
-        },
-        {
-            'name': 'low-volatility',
-            # much lower carbon price volatility
-            'overrides': {
-                'switch_cost': 1e9,
-                'harvest_penalty_per_m3': 10000.0,
-                'pc_rho': 0.8,
-                'pc_sigma': 0.05
-            }
-        },
-        {
-            'name': 'low-expectations',
-            # carbon price expected to trend downwards over time to $10/CO2
-            'overrides': {
-                'switch_cost': 1e9,
-                'harvest_penalty_per_m3': 10000.0,
-                'pc_0': 50.0,
-                'pc_mean': 10.0,
-                'pc_rho': 0.96,
-                'pc_sigma': 0.2
-            }
-        },
-        {
-            'name': 'high-expectations',
-            # carbon price expected to trend upwards over time to $300t/CO2
-            'overrides': {
-                'switch_cost': 1e9,
-                'harvest_penalty_per_m3': 10000.0,
-                'pc_0': 50.0,
-                'pc_mean': 300.0,
-                'pc_rho': 0.96,
-                'pc_sigma': 0.2
-            }
-        },
-        {
-            'name': 'stock-change-bank-credit',
-            'overrides': {
-                'switch_cost': 1e9,
-                'harvest_penalty_per_m3': 10000.0,
-                'carbon_credit_max_age': 10, # Bank credits beyond age 10 to surrender at harvest - functionally no carbon revenue
-            }
-        }
-    ]
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the canonical harvest timing workflow")
+    parser.add_argument(
+        "--config",
+        default=DEFAULT_RUN_ALL_CONFIG_PATH,
+        help=f"Path to workflow config (default: {DEFAULT_RUN_ALL_CONFIG_PATH})",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the expanded workflow and exit without running jobs.",
+    )
+    return parser.parse_args()
 
-    for sc in scenarios:
-        print(f"\n\n{'#'*80}")
-        print(f"RUNNING SCENARIO: {sc['name']}")
-        print(f"{'#'*80}\n")
-        
-        # Create parameters with specific overrides
-        # We use grid_size from args for consistency
-        params = ModelParameters(
-            N_pt=grid_size,
-            N_pc=grid_size,
-            **sc['overrides']
+
+def _print_job_header(title: str) -> None:
+    print(f"\n\n{'#' * 80}")
+    print(title)
+    print(f"{'#' * 80}\n")
+
+
+def _ensure_result_available(
+    run_name: str,
+    grid_size: int,
+    produced_results: set[tuple[str, int]],
+    consumer: str,
+) -> None:
+    if (run_name, grid_size) in produced_results:
+        return
+
+    pickle_path = model_results_path(run_name, grid_size)
+    if os.path.exists(pickle_path):
+        return
+
+    raise FileNotFoundError(
+        f"{consumer} requires {pickle_path}, but that result was not produced earlier "
+        "in this workflow and does not already exist on disk."
+    )
+
+
+def run_model_job(job: ModelRunJob) -> None:
+    scenario = get_model_scenario(job.scenario)
+    _print_job_header(
+        f"RUNNING MODEL SCENARIO: {job.scenario} -> {job.run_name} "
+        f"({job.grid_size}x{job.grid_size})"
+    )
+
+    params = ModelParameters(
+        N_pt=job.grid_size,
+        N_pc=job.grid_size,
+        **scenario["overrides"],
+    )
+    args = Namespace(
+        temp_dir=job.run_name,
+        grid_size=job.grid_size,
+        sanity_checks=False,
+    )
+    run_model(args=args, params=params)
+
+
+def run_utility_job(job: UtilityJob, produced_results: set[tuple[str, int]]) -> None:
+    for scenario in get_utility_scenarios(job.scenario_set):
+        _ensure_result_available(
+            scenario["run_name"],
+            job.grid_size,
+            produced_results,
+            consumer=f"utility job '{job.scenario_set}'",
         )
-        
-        # Setup mock arguments for the main function
-        args = MockArgs(
-            temp_dir=sc['name'],
-            grid_size=grid_size
+
+    _print_job_header(
+        f"RUNNING UTILITY JOB: {job.scenario_set} ({job.grid_size}x{job.grid_size})"
+    )
+    plot_utility_histograms(
+        Namespace(
+            scenario_set=job.scenario_set,
+            rerun=True,
+            grid_size=job.grid_size,
+            output_dir=job.output_dir,
+            pickle_path=None,
         )
-        
-        # Run the model
-        run_model(args=args, params=params)
+    )
+
+
+def run_plot_job(job: PlotJob, produced_results: set[tuple[str, int]]) -> None:
+    _ensure_result_available(
+        job.run_name,
+        job.grid_size,
+        produced_results,
+        consumer=f"plot job '{job.kind}:{job.run_name}'",
+    )
+
+    _print_job_header(
+        f"RUNNING PLOT JOB: {job.kind}:{job.run_name} ({job.grid_size}x{job.grid_size})"
+    )
+    if job.kind == "results":
+        plot_results(
+            Namespace(
+                temp_dir=job.run_name,
+                grid_size=job.grid_size,
+                pickle_path=None,
+                output_dir=job.output_dir,
+            )
+        )
+        return
+
+    raise ValueError(f"Unsupported plot job kind: {job.kind}")
+
+
+def execute_workflow(config: RunAllConfig) -> None:
+    produced_results: set[tuple[str, int]] = set()
+
+    for job in config.model_runs:
+        run_model_job(job)
+        produced_results.add((job.run_name, job.grid_size))
+
+    for job in config.utility_jobs:
+        run_utility_job(job, produced_results)
+
+    for job in config.plot_jobs:
+        run_plot_job(job, produced_results)
+
+
+def main(args: argparse.Namespace | None = None) -> None:
+    if args is None:
+        args = parse_args()
+
+    config = load_run_all_config(args.config)
+    print(f"Loaded workflow config from {args.config}")
+
+    if getattr(args, "dry_run", False):
+        print(describe_run_all_config(config))
+        return
+
+    execute_workflow(config)
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run multiple harvest timing scenarios")
-    parser.add_argument(
-        '--grid-size',
-        type=int,
-        default=DEFAULT_PRICE_GRID_SIZE,
-        help=f'Grid size for price discretization (default: {DEFAULT_PRICE_GRID_SIZE})',
-    )
-    args = parser.parse_args()
-    
-    run_scenarios(grid_size=args.grid_size)
-    plot_utility_histograms(
-        Namespace(
-            scenario_set='baseline',
-            rerun=False,
-            grid_size=args.grid_size,
-            output_dir=None,
-            pickle_path=None,
-        )
-    )
-    plot_utility_histograms(
-        Namespace(
-            scenario_set='suboptimal',
-            rerun=False,
-            grid_size=args.grid_size,
-            output_dir=None,
-            pickle_path=None,
-        )
-    )
-    plot_results(
-        Namespace(
-            temp_dir='baseline',
-            grid_size=args.grid_size,
-            pickle_path=None,
-            output_dir=None,
-        )
-    )
+    main()

@@ -8,7 +8,6 @@ import os
 import argparse
 
 from paper_style import (
-    REGIME_COLORS,
     REFERENCE_COLOR,
     configure_paper_style,
     save_figure,
@@ -29,55 +28,7 @@ from grid_config import (
     plot_output_dir,
     scenario_cache_path,
 )
-
-SCENARIOS_BASELINE = [
-    {
-        'name': 'Averaging',
-        'dir': 'baseline',
-        'regime': 0,
-        'rotation': 1,
-        'color': REGIME_COLORS['averaging'],
-    },
-    {
-        'name': 'Permanent',
-        'dir': 'baseline',
-        'regime': 1,
-        'rotation': 1,
-        'color': REGIME_COLORS['permanent'],
-    },
-    {
-        'name': 'Stock change',
-        'dir': 'baseline',
-        'regime': 2,
-        'rotation': 1,
-        'color': REGIME_COLORS['stock_change'],
-    },
-]
-
-SCENARIOS_SUBOPTIMAL = [
-    {
-        'name': 'Averaging',
-        'dir': 'baseline',
-        'regime': 0,
-        'rotation': 1,
-        'color': REGIME_COLORS['averaging'],
-    },
-    {
-        'name': 'Stock change (force harvest at age 28)',
-        'dir': 'baseline',
-        'regime': 2,
-        'rotation': 1,
-        'color': REGIME_COLORS['stock_change'],
-        'force_age': 28,
-    },
-    {
-        'name': 'Stock change (bank credits)',
-        'dir': 'stock-change-bank-credit',
-        'regime': 0,
-        'rotation': 1,
-        'color': '#7E6148',
-    }
-]
+from scenario_registry import get_utility_scenarios, list_utility_scenario_sets
 
 REQUIRED_CACHE_COLUMNS = {'carbon', 'timber', 'total', 'avg_pc', 'avg_pt', 'harvest_age'}
 
@@ -279,7 +230,7 @@ def main(args=None):
     parser.add_argument('--rerun', action='store_true', help='Force rerun of simulations even if cached CSVs exist')
     parser.add_argument(
         '--scenario-set',
-        choices=['baseline', 'suboptimal'],
+        choices=list_utility_scenario_sets(),
         default='baseline',
         help='Which scenario bundle to run'
     )
@@ -306,7 +257,11 @@ def main(args=None):
     grid_size = getattr(args, 'grid_size', DEFAULT_PRICE_GRID_SIZE)
     pickle_path_arg = getattr(args, 'pickle_path', None)
     output_dir = getattr(args, 'output_dir', None)
-    scenarios = SCENARIOS_SUBOPTIMAL if scenario_set == 'suboptimal' else SCENARIOS_BASELINE
+    try:
+        scenarios = get_utility_scenarios(scenario_set)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return
     default_output_grid_size = grid_size
 
     if pickle_path_arg is not None:
@@ -330,11 +285,11 @@ def main(args=None):
     N_YEARS = 50 
 
     for sc in scenarios:
-        if pickle_path_arg and sc['dir'] == 'baseline':
+        if pickle_path_arg and sc['run_name'] == 'baseline':
             pickle_path = pickle_path_arg
             expected_grid_size = None
         else:
-            pickle_path = model_results_path(sc['dir'], default_output_grid_size)
+            pickle_path = model_results_path(sc['run_name'], default_output_grid_size)
             expected_grid_size = default_output_grid_size
 
         cache_root = os.path.dirname(pickle_path) or "."
