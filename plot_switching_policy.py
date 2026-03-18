@@ -35,13 +35,14 @@ from harvest_timing_model import (
     build_price_grids,
     build_reward_matrix,
     build_state_space,
-    build_transition_matrix,
+    build_transition_representation,
     compute_carbon_curve,
     compute_carbon_flows_averaging,
     compute_carbon_flows_permanent,
     compute_price_quality_factor,
     compute_volume_from_carbon,
     solve_model,
+    solve_model_matrix_free,
 )
 from paper_style import (
     ACTION_COLOR_LIST,
@@ -136,17 +137,24 @@ def solve_or_load_results(output_dir: str, grid_size: int, rerun_model: bool) ->
         delta_perm,
         quality_curve,
     )
-    transition_matrix, s_indices, a_indices = build_transition_matrix(
+    transition_matrix, s_indices, a_indices, used_matrix_free = build_transition_representation(
         params, state_space, price_data
     )
-    values, sigma = solve_model(
-        reward_matrix,
-        transition_matrix,
-        params.beta,
-        method="policy_iteration",
-        s_indices=s_indices,
-        a_indices=a_indices,
-    )
+    if used_matrix_free:
+        values, sigma = solve_model_matrix_free(
+            reward_matrix,
+            transition_matrix,
+            params.beta,
+        )
+    else:
+        values, sigma = solve_model(
+            reward_matrix,
+            transition_matrix,
+            params.beta,
+            method="policy_iteration",
+            s_indices=s_indices,
+            a_indices=a_indices,
+        )
 
     results = {
         "params": params,
