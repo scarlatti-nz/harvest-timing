@@ -1011,7 +1011,7 @@ def _configure_sparse_policy_evaluation_solver(ddp: DiscreteDP) -> None:
     def robust_lineq_solve(A, b):
         nonlocal prefer_iterative, warned
 
-        # SuperLU factorization starts failing around the 22x22 / 23x23 grids in
+        # SuperLU factorization starts failing on the larger sparse grids in
         # this model even when the host still has plenty of RAM available.
         if prefer_iterative:
             if not warned:
