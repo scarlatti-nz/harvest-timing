@@ -48,7 +48,7 @@ from grid_config import (
     get_results_run_name,
     load_results_pickle,
     model_results_path,
-    plot_output_dir,
+    results_plot_output_dir,
 )
 
 
@@ -198,8 +198,8 @@ def plot_price_paths(
     # Save to plots directory if provided, or construct name
     if save_path:
         prepared_path = prepare_save_path(save_path)
-        # Assuming save_path is something like 'plots/price_paths.png'
-        # We want 'plots/price_paths_10_samples.png'
+        # If save_path is '<dir>/price_paths.png', write the samples figure as a sibling
+        # file named '<dir>/price_paths_samples.png'.
         dir_name = os.path.dirname(prepared_path)
         base_name = os.path.basename(prepared_path)
         name_part = os.path.splitext(base_name)[0]
@@ -275,10 +275,10 @@ def plot_decisions_by_price_state(
     
     if save_path:
         prepared_path = prepare_save_path(save_path)
-        plt.savefig(prepared_path, dpi=150, bbox_inches='tight')
+        save_figure(fig, prepared_path)
         print(f"  Saved: {prepared_path}")
-    
-    plt.close(fig)
+    else:
+        plt.close(fig)
 
 
 def plot_decisions_timber_vs_age(
@@ -350,10 +350,10 @@ def plot_decisions_timber_vs_age(
     
     if save_path:
         prepared_path = prepare_save_path(save_path)
-        plt.savefig(prepared_path, dpi=150, bbox_inches='tight')
+        save_figure(fig, prepared_path)
         print(f"  Saved: {prepared_path}")
-    
-    plt.close(fig)
+    else:
+        plt.close(fig)
 
 
 def plot_decisions_carbon_vs_age(
@@ -425,10 +425,10 @@ def plot_decisions_carbon_vs_age(
     
     if save_path:
         prepared_path = prepare_save_path(save_path)
-        plt.savefig(prepared_path, dpi=150, bbox_inches='tight')
+        save_figure(fig, prepared_path)
         print(f"  Saved: {prepared_path}")
-    
-    plt.close(fig)
+    else:
+        plt.close(fig)
 
 
 def generate_all_decision_plots(
@@ -592,9 +592,11 @@ def plot_simulation_trajectory(
     
     if save_path:
         prepared_path = prepare_save_path(save_path)
-        plt.savefig(prepared_path, dpi=150, bbox_inches='tight')
+        save_figure(fig, prepared_path)
         print(f"\nTrajectory simulation saved to: {prepared_path}")
-    
+    else:
+        plt.close(fig)
+
 
 def plot_trajectory_conference(
     data: Dict,
@@ -673,10 +675,10 @@ def plot_trajectory_conference(
     
     if save_path:
         prepared_path = prepare_save_path(save_path)
-        plt.savefig(prepared_path, dpi=200, bbox_inches='tight', facecolor='white')
+        save_figure(fig, prepared_path)
         print(f"  Conference trajectory saved to: {prepared_path}")
-    
-    plt.close(fig)
+    else:
+        plt.close(fig)
 
 
 def plot_trajectory_revenue_conference(
@@ -813,10 +815,10 @@ def plot_trajectory_revenue_conference(
     
     if save_path:
         prepared_path = prepare_save_path(save_path)
-        plt.savefig(prepared_path, dpi=200, bbox_inches='tight', facecolor='white')
+        save_figure(fig, prepared_path)
         print(f"  Revenue trajectory saved to: {prepared_path}")
-    
-    plt.close(fig)
+    else:
+        plt.close(fig)
 
 
 def plot_accounting_comparison(
@@ -1081,10 +1083,10 @@ def macro_impact(
 
     if save_path:
         prepared_path = prepare_save_path(save_path)
-        plt.savefig(prepared_path, dpi=150, bbox_inches='tight')
+        save_figure(fig, prepared_path)
         print(f"  Macro impact plot saved to: {prepared_path}")
-    
-    plt.close(fig)
+    else:
+        plt.close(fig)
 
 
 def plot_value_function(
@@ -1185,7 +1187,7 @@ def main(args=None):
     sim_data = results.get('sim_data')  # May not exist
     default_run_name = temp_dir if pickle_path_arg is None else infer_run_name_from_pickle_path(pickle_path)
     run_name = get_results_run_name(results, default=default_run_name)
-    output_dir = output_dir_arg or plot_output_dir(run_name, params.N_pc)
+    output_dir = output_dir_arg or results_plot_output_dir(run_name, params.N_pc)
     
     print("\n--- Generating Visualizations ---")
     

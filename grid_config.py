@@ -69,8 +69,20 @@ def scenario_cache_path(cache_root: str, scenario_name: str) -> str:
     return os.path.join(cache_root, f"{scenario_name}_realized_npvs.csv")
 
 
-def plot_output_dir(run_name: str, grid_size: int, plots_root: str = "plots") -> str:
-    return os.path.join(plots_root, run_name, grid_tag(grid_size))
+def results_plot_output_dir(
+    run_name: str,
+    grid_size: int,
+    plots_root: str = "plots",
+) -> str:
+    return os.path.join(plots_root, "results", run_name, grid_tag(grid_size))
+
+
+def utility_plot_output_dir(
+    scenario_set: str,
+    grid_size: int,
+    plots_root: str = "plots",
+) -> str:
+    return os.path.join(plots_root, "utility", scenario_set, grid_tag(grid_size))
 
 
 def build_results_metadata(params: Any, run_name: Optional[str] = None) -> dict[str, Any]:

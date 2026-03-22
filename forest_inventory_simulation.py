@@ -8,7 +8,7 @@ from grid_config import (
     DEFAULT_PRICE_GRID_SIZE,
     load_results_pickle,
     model_results_path,
-    plot_output_dir,
+    results_plot_output_dir,
 )
 # Import definitions from main model
 from harvest_timing_model import (
@@ -139,7 +139,7 @@ def main():
     parser.add_argument('--pickle-path', type=str, default=None,
                         help='Path to model results pickle file (overrides --temp-dir and --grid-size)')
     parser.add_argument('--output-dir', type=str, default=None,
-                        help='Directory to save plots (defaults to a grid-specific plots path)')
+                        help='Directory to save plots (defaults to plots/results/forest_inventory/grid_<N>x<N>)')
     parser.add_argument('--regime', type=int, choices=[0, 1, 2], default=0,
                         help='Regime for all forests (0: averaging, 1: permanent, 2: pre-2023 stock-change)')
     parser.add_argument('--n-years', type=int, default=50, help='Number of years to simulate')
@@ -171,7 +171,7 @@ def main():
     sim_results = simulate_forest_inventory(results, args.regime, n_years=args.n_years, seed=args.seed)
     
     # Plotting
-    output_dir = args.output_dir or plot_output_dir("forest_inventory", results['params'].N_pc)
+    output_dir = args.output_dir or results_plot_output_dir("forest_inventory", results['params'].N_pc)
     os.makedirs(output_dir, exist_ok=True)
     
     # Chart 1: Harvest Volume

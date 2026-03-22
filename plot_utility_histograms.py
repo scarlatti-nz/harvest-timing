@@ -25,8 +25,8 @@ from grid_config import (
     DEFAULT_PRICE_GRID_SIZE,
     load_results_pickle,
     model_results_path,
-    plot_output_dir,
     scenario_cache_path,
+    utility_plot_output_dir,
 )
 from scenario_registry import get_utility_scenarios, list_utility_scenario_sets
 
@@ -237,7 +237,7 @@ def main(args=None):
     parser.add_argument(
         '--output-dir',
         default=None,
-        help='Directory to save figures (defaults to a grid-specific plots path)'
+        help='Directory to save figures (defaults to plots/utility/<scenario_set>/grid_<N>x<N>)'
     )
     parser.add_argument(
         '--grid-size',
@@ -276,7 +276,7 @@ def main(args=None):
         default_output_grid_size = explicit_results['params'].N_pc
 
     if output_dir is None:
-        output_dir = plot_output_dir(f"utility_{scenario_set}", default_output_grid_size)
+        output_dir = utility_plot_output_dir(scenario_set, default_output_grid_size)
 
     results_storage = []
     
