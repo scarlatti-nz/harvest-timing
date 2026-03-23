@@ -8,7 +8,7 @@ import argparse
 import os
 from types import SimpleNamespace
 
-from grid_config import DEFAULT_PRICE_GRID_SIZE, grid_tag
+from grid_config import grid_tag
 from paper_style import configure_paper_style
 from plot_results import plot_accounting_comparison, plot_price_paths, plot_value_function
 from plot_switching_policy import (
@@ -26,6 +26,9 @@ from plot_switching_policy import (
 from plot_utility_histograms import main as plot_utility_histograms
 
 
+DEFAULT_PAPER_FIGURE_GRID_SIZE = 201
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build paper-ready figures")
     parser.add_argument(
@@ -41,8 +44,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--grid-size",
         type=int,
-        default=DEFAULT_PRICE_GRID_SIZE,
-        help=f"Number of timber and carbon price states (default: {DEFAULT_PRICE_GRID_SIZE})",
+        default=DEFAULT_PAPER_FIGURE_GRID_SIZE,
+        help=(
+            "Number of timber and carbon price states "
+            f"(default: {DEFAULT_PAPER_FIGURE_GRID_SIZE})"
+        ),
     )
     return parser.parse_args()
 
