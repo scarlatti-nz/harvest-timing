@@ -20,6 +20,11 @@ ACTION_COLORS = {
     "Harvest": "#E64B35",
     "Switch": "#4DBBD5",
 }
+ACTION_LEGEND_LABELS = {
+    "Hold": "Hold",
+    "Harvest": "Harvest",
+    "Switch": "Switch to permanent",
+}
 ACTION_COLOR_LIST = [
     ACTION_COLORS["Hold"],
     ACTION_COLORS["Harvest"],
@@ -137,7 +142,7 @@ def add_action_legend(
     height: float,
 ) -> None:
     handles = [
-        Patch(facecolor=color, edgecolor="none", label=label)
+        Patch(facecolor=color, edgecolor="none", label=ACTION_LEGEND_LABELS[label])
         for label, color in ACTION_COLORS.items()
     ]
     legend_ax = fig.add_axes([left, bottom, width, height])

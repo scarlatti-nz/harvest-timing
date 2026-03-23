@@ -12,10 +12,12 @@ from grid_config import DEFAULT_PRICE_GRID_SIZE, grid_tag
 from paper_style import configure_paper_style
 from plot_results import plot_accounting_comparison, plot_price_paths, plot_value_function
 from plot_switching_policy import (
+    LATER_ROTATION_PHASE_DIAGRAM_AGES,
+    LATER_ROTATION_PHASE_DIAGRAM_TITLE_SUFFIXES,
+    MAIN_PHASE_DIAGRAM_ANNOTATIONS,
+    MAIN_PHASE_DIAGRAM_TITLE_SUFFIXES,
     MAIN_PHASE_DIAGRAM_AGES,
-    choose_later_rotation_ages,
     compute_switch_share_table,
-    find_rotation_difference_ages,
     plot_age_carbon_frontier,
     plot_phase_diagram_panels,
     plot_switch_share_by_age,
@@ -84,6 +86,9 @@ def build_switching_figures(
         rotation=1,
         output_stem=os.path.join(main_dir, "main_phase_diagram_averaging_first_rotation"),
         panel_title_prefix="Stand age",
+        panel_title_suffixes=MAIN_PHASE_DIAGRAM_TITLE_SUFFIXES,
+        panel_annotations=MAIN_PHASE_DIAGRAM_ANNOTATIONS,
+        smooth_regions=True,
     )
     plot_age_carbon_frontier(
         sigma=sigma,
@@ -95,24 +100,18 @@ def build_switching_figures(
         output_stem=os.path.join(main_dir, "switching_frontier_by_age"),
     )
 
-    rotation_difference_ages = find_rotation_difference_ages(
-        sigma=sigma,
-        state_space=state_space,
-        params=params,
-    )
-    later_rotation_ages = choose_later_rotation_ages(
-        rotation_difference_ages=rotation_difference_ages,
-        params=params,
-    )
     plot_phase_diagram_panels(
         sigma=sigma,
         state_space=state_space,
         params=params,
         price_data=price_data,
-        ages=later_rotation_ages,
+        ages=LATER_ROTATION_PHASE_DIAGRAM_AGES,
         regime=0,
         rotation=2,
         output_stem=os.path.join(main_dir, "phase_diagram_later_rotations"),
+        panel_title_prefix="Stand age",
+        panel_title_suffixes=LATER_ROTATION_PHASE_DIAGRAM_TITLE_SUFFIXES,
+        smooth_regions=True,
     )
 
     share_df = compute_switch_share_table(

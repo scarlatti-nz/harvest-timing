@@ -18,6 +18,7 @@ from typing import Dict, List, Sequence
 
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
+from matplotlib.patches import Polygon, Rectangle
 import numpy as np
 import pandas as pd
 
@@ -45,6 +46,7 @@ from harvest_timing_model import (
     solve_model_matrix_free,
 )
 from paper_style import (
+    ACTION_COLORS,
     ACTION_COLOR_LIST,
     LIGHT_GREY,
     TEXT_BLACK,
@@ -69,8 +71,58 @@ TIMBER_SLICE_LABELS = ["Low timber price", "Median timber price", "High timber p
 PANEL_LABELS_2X2 = ["a", "b", "c", "d"]
 PANEL_LABELS_1X3 = ["a", "b", "c"]
 MAIN_PHASE_DIAGRAM_AGES = [10, 16, 22, 30]
+MAIN_PHASE_DIAGRAM_TITLE_SUFFIXES = [
+    "0-15 years",
+    "16 years",
+    "22 years",
+    "30 years",
+]
+MAIN_PHASE_DIAGRAM_ANNOTATIONS = [
+    None,
+    "Optimal to switch to permanent\nat end of averaging period\nunless carbon price is low",
+    [
+        {
+            "text": "Switch if carbon price is high\nand timber price is sufficiently low",
+            "x": 0.28,
+            "y": 0.88,
+            "ha": "center",
+            "va": "top",
+            "fontsize": 7.1,
+        },
+        {
+            "text": "Harvest only if\nthe price is very high",
+            "x": 0.67,
+            "y": 0.50,
+            "ha": "center",
+            "va": "center",
+            "fontsize": 7.1,
+            "line_from": (0.76, 0.50),
+            "line_to": (0.90, 0.52),
+        },
+    ],
+    {
+        "text": "Harvest when the price is\nsufficiently high",
+        "x": 0.75,
+        "y": 0.50,
+        "ha": "center",
+        "va": "center",
+        "fontsize": 7.1,
+    },
+]
+LATER_ROTATION_PHASE_DIAGRAM_AGES = [1, 4, 15, 16]
+LATER_ROTATION_PHASE_DIAGRAM_TITLE_SUFFIXES = [
+    "1 years",
+    "4 years",
+    "5-15 years",
+    "16 years",
+]
 TIMBER_PRICE_MIN = 100.0
 TIMBER_PRICE_MAX = 220.0
+MAIN_PHASE_DIAGRAM_Y_MIN = 0.0
+MAIN_PHASE_DIAGRAM_Y_MAX = 150.0
+MAIN_PHASE_SWITCH_LOWESS_FRAC = 0.24
+MAIN_PHASE_HARVEST_LOWESS_FRAC = 0.28
+MAIN_PHASE_SMOOTH_POINTS = 1400
 
 
 def parse_args() -> argparse.Namespace:
@@ -114,7 +166,13 @@ def solve_or_load_results(output_dir: str, grid_size: int, rerun_model: bool) ->
     pickle_path = os.path.join(output_dir, "model_results.pkl")
     if os.path.exists(pickle_path) and not rerun_model:
         try:
-            return load_results_pickle(pickle_path, expected_grid_size=grid_size)
+            results = load_results_pickle(pickle_path, expected_grid_size=grid_size)
+            run_name = results.get("metadata", {}).get("run_name")
+            if run_name != "switching_policy":
+                raise ValueError(
+                    f"expected switching_policy cache, found {run_name or 'unknown'}"
+                )
+            return results
         except ValueError as exc:
             print(f"Cached results at {pickle_path} are invalid for grid size {grid_size}: {exc}")
             print("Rebuilding switching-policy results...")
@@ -269,6 +327,293 @@ def draw_action_boundaries(
                 )
 
 
+def _compress_constant_segments(
+    u_vals: np.ndarray,
+    v_vals: np.ndarray,
+    tol: float = 1e-9,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if len(u_vals) == 0:
+        empty = np.array([], dtype=float)
+        return empty, empty, empty, empty
+
+    groups = []
+    start = 0
+    for idx in range(1, len(v_vals) + 1):
+        if idx == len(v_vals) or abs(v_vals[idx] - v_vals[start]) > tol:
+            u_group = u_vals[start:idx]
+            groups.append((u_group[0], u_group[-1], u_group.mean(), v_vals[start]))
+            start = idx
+
+    u_lo = np.array([group[0] for group in groups], dtype=float)
+    u_hi = np.array([group[1] for group in groups], dtype=float)
+    u_mid = np.array([group[2] for group in groups], dtype=float)
+    v_mid = np.array([group[3] for group in groups], dtype=float)
+    return u_lo, u_hi, u_mid, v_mid
+
+
+def _visible_row_slice(
+    y_edges: np.ndarray,
+    *,
+    y_min: float,
+    y_max: float,
+) -> tuple[slice, np.ndarray]:
+    row_mask = (y_edges[:-1] < y_max) & (y_edges[1:] > y_min)
+    row_indices = np.flatnonzero(row_mask)
+    if row_indices.size == 0:
+        return slice(0, len(y_edges) - 1), y_edges
+    row_start = int(row_indices.min())
+    row_stop = int(row_indices.max()) + 1
+    return slice(row_start, row_stop), y_edges[row_start : row_stop + 1]
+
+
+def _extract_switch_boundary(
+    matrix: np.ndarray,
+    x_edges: np.ndarray,
+    y_edges: np.ndarray,
+) -> dict[str, np.ndarray | str] | None:
+    n_rows = matrix.shape[0]
+    x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+    xs: list[float] = []
+    ys: list[float] = []
+    cols: list[int] = []
+    lower_count = 0
+    upper_count = 0
+    for col in range(matrix.shape[1]):
+        rows = np.flatnonzero(matrix[:, col] == ACTION_TO_PLOT_CODE[ACTION_SWITCH_PERMANENT])
+        if rows.size == 0:
+            continue
+        xs.append(float(x_centers[col]))
+        cols.append(col)
+        touches_bottom = int(rows.min()) == 0
+        touches_top = int(rows.max()) == n_rows - 1
+        if touches_bottom and not touches_top:
+            lower_count += 1
+        elif touches_top and not touches_bottom:
+            upper_count += 1
+
+    if not xs:
+        return None
+
+    if lower_count > upper_count:
+        orientation = "lower"
+    elif upper_count > lower_count:
+        orientation = "upper"
+    else:
+        switch_rows, _ = np.where(matrix == ACTION_TO_PLOT_CODE[ACTION_SWITCH_PERMANENT])
+        orientation = (
+            "lower"
+            if switch_rows.size and float(switch_rows.mean()) < 0.5 * (n_rows - 1)
+            else "upper"
+        )
+
+    xs = []
+    ys = []
+    cols = []
+    for col in range(matrix.shape[1]):
+        rows = np.flatnonzero(matrix[:, col] == ACTION_TO_PLOT_CODE[ACTION_SWITCH_PERMANENT])
+        if rows.size == 0:
+            continue
+        xs.append(float(x_centers[col]))
+        if orientation == "lower":
+            ys.append(float(y_edges[int(rows.max()) + 1]))
+        else:
+            ys.append(float(y_edges[int(rows.min())]))
+        cols.append(col)
+
+    col_idx = np.array(cols, dtype=int)
+    return {
+        "u": np.array(xs, dtype=float),
+        "v": np.array(ys, dtype=float),
+        "u_lo": np.array([x_edges[int(col_idx.min())]], dtype=float),
+        "u_hi": np.array([x_edges[int(col_idx.max()) + 1]], dtype=float),
+        "orientation": orientation,
+    }
+
+
+def _extract_harvest_left_boundary(
+    matrix: np.ndarray,
+    x_edges: np.ndarray,
+    y_edges: np.ndarray,
+) -> dict[str, np.ndarray] | None:
+    y_centers = 0.5 * (y_edges[:-1] + y_edges[1:])
+    ys: list[float] = []
+    xs: list[float] = []
+    rows_seen: list[int] = []
+    for row in range(matrix.shape[0]):
+        cols = np.flatnonzero(matrix[row] == ACTION_TO_PLOT_CODE[ACTION_HARVEST_REPLANT])
+        if cols.size == 0:
+            continue
+        ys.append(float(y_centers[row]))
+        xs.append(float(x_edges[int(cols[0])]))
+        rows_seen.append(row)
+
+    if not ys:
+        return None
+
+    row_idx = np.array(rows_seen, dtype=int)
+    return {
+        "u": np.array(ys, dtype=float),
+        "v": np.array(xs, dtype=float),
+        "u_lo": np.array([y_edges[int(row_idx.min())]], dtype=float),
+        "u_hi": np.array([y_edges[int(row_idx.max()) + 1]], dtype=float),
+    }
+
+
+def _fit_lowess_v_of_u(
+    boundary: dict[str, np.ndarray] | None,
+    *,
+    frac: float,
+    n_dense: int,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    if boundary is None:
+        return None
+
+    try:
+        from statsmodels.nonparametric.smoothers_lowess import lowess
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "statsmodels is required for smoothed main phase diagrams. "
+            "Install it with `./.venv/bin/pip install -r requirements.txt`."
+        ) from exc
+
+    u_vals = boundary["u"]
+    v_vals = boundary["v"]
+    u_support_lo = float(boundary["u_lo"][0])
+    u_support_hi = float(boundary["u_hi"][0])
+    _, _, u_mid, v_mid = _compress_constant_segments(u_vals, v_vals)
+    u_dense = np.linspace(u_support_lo, u_support_hi, n_dense)
+
+    if len(u_mid) == 1:
+        v_dense = np.full_like(u_dense, v_mid[0], dtype=float)
+        return u_dense, v_dense
+
+    fitted = lowess(v_mid, u_mid, frac=min(frac, 0.99), it=0, return_sorted=True)
+    fit_u = fitted[:, 0]
+    fit_v = fitted[:, 1]
+    v_dense = np.interp(u_dense, fit_u, fit_v)
+    slope_lo = (fit_v[1] - fit_v[0]) / (fit_u[1] - fit_u[0])
+    slope_hi = (fit_v[-1] - fit_v[-2]) / (fit_u[-1] - fit_u[-2])
+    lo_mask = u_dense < fit_u[0]
+    hi_mask = u_dense > fit_u[-1]
+    v_dense[lo_mask] = fit_v[0] + slope_lo * (u_dense[lo_mask] - fit_u[0])
+    v_dense[hi_mask] = fit_v[-1] + slope_hi * (u_dense[hi_mask] - fit_u[-1])
+    return u_dense, v_dense
+
+
+def _add_clipped_patch(ax: plt.Axes, patch) -> None:
+    patch.set_clip_on(True)
+    patch.set_clip_path(ax.patch)
+    ax.add_patch(patch)
+
+
+def _bring_axes_to_front(ax: plt.Axes) -> None:
+    ax.set_axisbelow(False)
+    for spine in ax.spines.values():
+        spine.set_zorder(20)
+    ax.xaxis.set_zorder(20)
+    ax.yaxis.set_zorder(20)
+    for tick in ax.xaxis.get_major_ticks() + ax.yaxis.get_major_ticks():
+        tick.tick1line.set_zorder(21)
+        tick.tick2line.set_zorder(21)
+        tick.label1.set_zorder(21)
+        tick.label2.set_zorder(21)
+    ax.xaxis.label.set_zorder(21)
+    ax.yaxis.label.set_zorder(21)
+    ax.title.set_zorder(21)
+
+
+def _plot_smoothed_main_phase_regions(
+    ax: plt.Axes,
+    matrix: np.ndarray,
+    x_edges: np.ndarray,
+    y_edges: np.ndarray,
+) -> None:
+    row_slice, visible_y_edges = _visible_row_slice(
+        y_edges,
+        y_min=MAIN_PHASE_DIAGRAM_Y_MIN,
+        y_max=MAIN_PHASE_DIAGRAM_Y_MAX,
+    )
+    visible_matrix = matrix[row_slice, :]
+    x_min = float(x_edges[0])
+    x_max = float(x_edges[-1])
+    y_min = MAIN_PHASE_DIAGRAM_Y_MIN
+    y_max = MAIN_PHASE_DIAGRAM_Y_MAX
+
+    _add_clipped_patch(
+        ax,
+        Rectangle(
+            (x_min, y_min),
+            x_max - x_min,
+            y_max - y_min,
+            facecolor=ACTION_COLORS["Hold"],
+            edgecolor="none",
+            zorder=0.1,
+        ),
+    )
+
+    switch_meta = _extract_switch_boundary(visible_matrix, x_edges, visible_y_edges)
+    switch_boundary = _fit_lowess_v_of_u(
+        switch_meta,
+        frac=MAIN_PHASE_SWITCH_LOWESS_FRAC,
+        n_dense=MAIN_PHASE_SMOOTH_POINTS,
+    )
+    if switch_boundary is not None:
+        switch_x, switch_y = switch_boundary
+        switch_x = np.clip(switch_x, x_min, x_max)
+        switch_y = np.clip(switch_y, y_min, y_max)
+        assert switch_meta is not None
+        if switch_meta["orientation"] == "lower":
+            switch_points = np.column_stack(
+                [
+                    np.concatenate(([switch_x[0]], switch_x, [switch_x[-1]])),
+                    np.concatenate(([y_min], switch_y, [y_min])),
+                ]
+            )
+        else:
+            switch_points = np.column_stack(
+                [
+                    np.concatenate(([switch_x[0]], switch_x, [switch_x[-1]])),
+                    np.concatenate(([y_max], switch_y, [y_max])),
+                ]
+            )
+        _add_clipped_patch(
+            ax,
+            Polygon(
+                switch_points,
+                closed=True,
+                facecolor=ACTION_COLORS["Switch"],
+                edgecolor="none",
+                zorder=0.2,
+            ),
+        )
+
+    harvest_boundary = _fit_lowess_v_of_u(
+        _extract_harvest_left_boundary(visible_matrix, x_edges, visible_y_edges),
+        frac=MAIN_PHASE_HARVEST_LOWESS_FRAC,
+        n_dense=MAIN_PHASE_SMOOTH_POINTS,
+    )
+    if harvest_boundary is not None:
+        harvest_y, harvest_x = harvest_boundary
+        harvest_x = np.clip(harvest_x, x_min, x_max)
+        harvest_y = np.clip(harvest_y, y_min, y_max)
+        harvest_points = np.column_stack(
+            [
+                np.concatenate((harvest_x, [x_max, x_max])),
+                np.concatenate((harvest_y, [harvest_y[-1], harvest_y[0]])),
+            ]
+        )
+        _add_clipped_patch(
+            ax,
+            Polygon(
+                harvest_points,
+                closed=True,
+                facecolor=ACTION_COLORS["Harvest"],
+                edgecolor="none",
+                zorder=0.3,
+            ),
+        )
+
+
 def timber_slice_indices(params: ModelParameters) -> List[int]:
     return [0, params.N_pt // 2, params.N_pt - 1]
 
@@ -292,6 +637,9 @@ def plot_phase_diagram_panels(
     rotation: int,
     output_stem: str,
     panel_title_prefix: str | None = None,
+    panel_title_suffixes: Sequence[str] | None = None,
+    panel_annotations: Sequence[object | None] | None = None,
+    smooth_regions: bool = False,
 ) -> None:
     pt_grid = price_data["pt_grid"]
     pc_grid = price_data["pc_grid"]
@@ -308,7 +656,12 @@ def plot_phase_diagram_panels(
     pt_edges_for_plot[-1] = TIMBER_PRICE_MAX
 
     fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.6), sharex=True, sharey=True)
-    for ax, age, panel_label in zip(axes.flatten(), ages, PANEL_LABELS_2X2):
+    if panel_title_suffixes is not None and len(panel_title_suffixes) != len(ages):
+        raise ValueError("panel_title_suffixes must match the number of ages")
+    if panel_annotations is not None and len(panel_annotations) != len(ages):
+        raise ValueError("panel_annotations must match the number of ages")
+
+    for i, (ax, age, panel_label) in enumerate(zip(axes.flatten(), ages, PANEL_LABELS_2X2)):
         clamped_age = min(age, params.A_max)
         matrix = price_phase_matrix(
             sigma, state_space, params, clamped_age, regime=regime, rotation=rotation
@@ -318,25 +671,38 @@ def plot_phase_diagram_panels(
             matrix_for_plot = matrix
         matrix_for_plot = np.vstack((matrix_for_plot[:1, :], matrix_for_plot))
         pc_edges_for_plot = np.concatenate(([0.0], pc_edges))
-        ax.pcolormesh(
-            pt_edges_for_plot,
-            pc_edges_for_plot,
-            matrix_for_plot,
-            cmap=cmap,
-            norm=norm,
-            shading="flat",
-            antialiased=False,
-            edgecolors="none",
-            linewidth=0.0,
-            rasterized=True,
-        )
-        draw_action_boundaries(ax, pt_edges_for_plot, pc_edges_for_plot, matrix_for_plot)
+        if smooth_regions:
+            _plot_smoothed_main_phase_regions(
+                ax,
+                matrix_for_plot,
+                pt_edges_for_plot,
+                pc_edges_for_plot,
+            )
+        else:
+            ax.pcolormesh(
+                pt_edges_for_plot,
+                pc_edges_for_plot,
+                matrix_for_plot,
+                cmap=cmap,
+                norm=norm,
+                shading="flat",
+                antialiased=False,
+                edgecolors="none",
+                linewidth=0.0,
+                rasterized=True,
+            )
+            draw_action_boundaries(ax, pt_edges_for_plot, pc_edges_for_plot, matrix_for_plot)
         add_panel_label(ax, panel_label)
         if panel_title_prefix is None:
             add_panel_condition(ax, f"{clamped_age} years")
         else:
-            ax.set_title(f"{panel_title_prefix}: {clamped_age} years", loc="left", pad=4)
-        if panel_label == "a":
+            title_suffix = (
+                panel_title_suffixes[i]
+                if panel_title_suffixes is not None
+                else f"{clamped_age} years"
+            )
+            ax.set_title(f"{panel_title_prefix}: {title_suffix}", loc="left", pad=4)
+        if np.all(matrix_for_plot == ACTION_TO_PLOT_CODE[ACTION_DO_NOTHING]):
             ax.text(
                 0.5,
                 0.5,
@@ -347,6 +713,47 @@ def plot_phase_diagram_panels(
                 fontsize=9,
                 color=TEXT_BLACK,
             )
+        annotation = panel_annotations[i] if panel_annotations is not None else None
+        if annotation:
+            annotation_items = annotation if isinstance(annotation, (list, tuple)) else [annotation]
+            for annotation_item in annotation_items:
+                if isinstance(annotation_item, str):
+                    annotation_kwargs = {
+                        "text": annotation_item,
+                        "x": 0.5,
+                        "y": 0.5,
+                        "ha": "center",
+                        "va": "center",
+                        "fontsize": 7.3,
+                    }
+                else:
+                    annotation_kwargs = {
+                        "text": annotation_item["text"],
+                        "x": annotation_item.get("x", 0.5),
+                        "y": annotation_item.get("y", 0.5),
+                        "ha": annotation_item.get("ha", "center"),
+                        "va": annotation_item.get("va", "center"),
+                        "fontsize": annotation_item.get("fontsize", 7.3),
+                    }
+                ax.text(
+                    annotation_kwargs["x"],
+                    annotation_kwargs["y"],
+                    annotation_kwargs["text"],
+                    transform=ax.transAxes,
+                    ha=annotation_kwargs["ha"],
+                    va=annotation_kwargs["va"],
+                    fontsize=annotation_kwargs["fontsize"],
+                    color=TEXT_BLACK,
+                )
+                if isinstance(annotation_item, dict) and "line_from" in annotation_item and "line_to" in annotation_item:
+                    ax.plot(
+                        [annotation_item["line_from"][0], annotation_item["line_to"][0]],
+                        [annotation_item["line_from"][1], annotation_item["line_to"][1]],
+                        transform=ax.transAxes,
+                        color=TEXT_BLACK,
+                        linewidth=0.6,
+                        solid_capstyle="round",
+                    )
         ax.set_ylim(0, 150)
         ax.set_yticks(np.arange(0, 151, 25))
         ax.set_xlim(TIMBER_PRICE_MIN, TIMBER_PRICE_MAX)
@@ -354,6 +761,8 @@ def plot_phase_diagram_panels(
         ax.set_xlabel("Timber price ($ per m³)")
         ax.set_ylabel(r"Carbon price (\$ per tCO$_2$)")
         style_axes(ax)
+        if smooth_regions:
+            _bring_axes_to_front(ax)
 
     fig.subplots_adjust(left=0.10, right=0.995, top=0.98, bottom=0.125, wspace=0.12, hspace=0.22)
     add_action_legend(fig, left=0.10, bottom=0.015, width=0.895, height=0.035)
@@ -584,33 +993,6 @@ def find_rotation_difference_ages(
     return diff_ages
 
 
-def choose_later_rotation_ages(
-    rotation_difference_ages: Sequence[int],
-    params: ModelParameters,
-) -> List[int]:
-    if not rotation_difference_ages:
-        return [0, params.carbon_credit_max_age // 2, params.carbon_credit_max_age, min(30, params.A_max)]
-
-    candidate_ages = [
-        rotation_difference_ages[0],
-        rotation_difference_ages[len(rotation_difference_ages) // 2],
-        rotation_difference_ages[-1],
-        params.carbon_credit_max_age,
-    ]
-    chosen: List[int] = []
-    for age in candidate_ages:
-        if age not in chosen:
-            chosen.append(age)
-
-    fill_age = 0
-    while len(chosen) < 4 and fill_age <= params.A_max:
-        if fill_age not in chosen:
-            chosen.append(fill_age)
-        fill_age += 1
-
-    return chosen[:4]
-
-
 def summarize_switch_shares(share_df: pd.DataFrame, rotation: int) -> Dict[str, float]:
     subset = share_df.loc[share_df["rotation"] == rotation].copy()
     positive = subset.loc[subset["switch_share_weighted"] > 0]
@@ -748,6 +1130,9 @@ def main() -> None:
             paths["figures"], "main_phase_diagram_averaging_first_rotation"
         ),
         panel_title_prefix="Stand age",
+        panel_title_suffixes=MAIN_PHASE_DIAGRAM_TITLE_SUFFIXES,
+        panel_annotations=MAIN_PHASE_DIAGRAM_ANNOTATIONS,
+        smooth_regions=True,
     )
 
     plot_age_carbon_frontier(
@@ -765,19 +1150,18 @@ def main() -> None:
         state_space=state_space,
         params=params,
     )
-    later_rotation_ages = choose_later_rotation_ages(
-        rotation_difference_ages=rotation_difference_ages,
-        params=params,
-    )
     plot_phase_diagram_panels(
         sigma=sigma,
         state_space=state_space,
         params=params,
         price_data=price_data,
-        ages=later_rotation_ages,
+        ages=LATER_ROTATION_PHASE_DIAGRAM_AGES,
         regime=0,
         rotation=2,
         output_stem=os.path.join(paths["figures"], "phase_diagram_later_rotations"),
+        panel_title_prefix="Stand age",
+        panel_title_suffixes=LATER_ROTATION_PHASE_DIAGRAM_TITLE_SUFFIXES,
+        smooth_regions=True,
     )
 
     share_df = compute_switch_share_table(
@@ -802,7 +1186,7 @@ def main() -> None:
         state_space=state_space,
         params=params,
         price_data=price_data,
-        ages=sorted(set(MAIN_PHASE_DIAGRAM_AGES).union(later_rotation_ages)),
+        ages=sorted(set(MAIN_PHASE_DIAGRAM_AGES).union(LATER_ROTATION_PHASE_DIAGRAM_AGES)),
         regime=0,
     )
     threshold_df.to_csv(
