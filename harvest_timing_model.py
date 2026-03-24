@@ -1595,7 +1595,11 @@ def main(args=None, params=None):
         'V': V,
         'sigma': sigma,
         'sim_data': sim_data,
-        'metadata': build_results_metadata(params, run_name=args.temp_dir),
+        'metadata': build_results_metadata(
+            params,
+            run_name=args.temp_dir,
+            model_scenario=getattr(args, "model_scenario", None),
+        ),
     }
     
     with open(pickle_path, 'wb') as f:

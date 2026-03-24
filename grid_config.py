@@ -45,6 +45,13 @@ def output_root(run_name: str, grid_size: int, outputs_root: str = "outputs") ->
     return os.path.join(outputs_root, run_name, grid_tag(grid_size))
 
 
+def switching_policy_output_dir(
+    grid_size: int,
+    outputs_root: str = "outputs",
+) -> str:
+    return output_root("switching_policy", grid_size, outputs_root)
+
+
 def model_results_path(
     run_name: str,
     grid_size: int,
@@ -85,7 +92,11 @@ def utility_plot_output_dir(
     return os.path.join(plots_root, "utility", scenario_set, grid_tag(grid_size))
 
 
-def build_results_metadata(params: Any, run_name: Optional[str] = None) -> dict[str, Any]:
+def build_results_metadata(
+    params: Any,
+    run_name: Optional[str] = None,
+    model_scenario: Optional[str] = None,
+) -> dict[str, Any]:
     size = require_square_price_grid(params)
     metadata: dict[str, Any] = {
         "schema_version": RESULTS_SCHEMA_VERSION,
@@ -94,6 +105,8 @@ def build_results_metadata(params: Any, run_name: Optional[str] = None) -> dict[
     }
     if run_name is not None:
         metadata["run_name"] = run_name
+    if model_scenario is not None:
+        metadata["model_scenario"] = model_scenario
     return metadata
 
 

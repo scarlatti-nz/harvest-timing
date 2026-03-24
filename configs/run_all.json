@@ -9,13 +9,17 @@
     {"scenario": "low-volatility", "run_name": "low-volatility", "grid_size": 201},
     {"scenario": "low-expectations", "run_name": "low-expectations", "grid_size": 201},
     {"scenario": "high-expectations", "run_name": "high-expectations", "grid_size": 201},
-    {"scenario": "stock-change-bank-credit", "run_name": "stock-change-bank-credit", "grid_size": 201}
+    {"scenario": "stock-change-bank-credit", "run_name": "stock-change-bank-credit", "grid_size": 201},
+    {"scenario": "switching-policy", "run_name": "switching_policy", "grid_size": 201}
   ],
   "utility_jobs": [
     {"scenario_set": "baseline", "grid_size": 11},
     {"scenario_set": "suboptimal", "grid_size": 11},
     {"scenario_set": "baseline", "grid_size": 201},
     {"scenario_set": "suboptimal", "grid_size": 201}
+  ],
+  "paper_figure_jobs": [
+    {"grid_size": 201}
   ],
   "plot_jobs": [
     {"kind": "results", "run_name": "baseline", "grid_size": 11},

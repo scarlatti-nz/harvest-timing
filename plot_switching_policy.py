@@ -26,6 +26,7 @@ from grid_config import (
     DEFAULT_PRICE_GRID_SIZE,
     build_results_metadata,
     grid_tag,
+    infer_run_name_from_pickle_path,
     load_results_pickle,
 )
 from harvest_timing_model import (
@@ -58,6 +59,7 @@ from paper_style import (
     save_figure,
     style_axes,
 )
+from scenario_registry import resolve_results_model_scenario
 
 
 ACTION_TO_PLOT_CODE = {
@@ -167,10 +169,10 @@ def solve_or_load_results(output_dir: str, grid_size: int, rerun_model: bool) ->
     if os.path.exists(pickle_path) and not rerun_model:
         try:
             results = load_results_pickle(pickle_path, expected_grid_size=grid_size)
-            run_name = results.get("metadata", {}).get("run_name")
-            if run_name != "switching_policy":
+            model_scenario = resolve_results_model_scenario(results)
+            if model_scenario != "switching-policy":
                 raise ValueError(
-                    f"expected switching_policy cache, found {run_name or 'unknown'}"
+                    f"expected switching-policy scenario cache, found {model_scenario}"
                 )
             return results
         except ValueError as exc:
@@ -221,7 +223,11 @@ def solve_or_load_results(output_dir: str, grid_size: int, rerun_model: bool) ->
         "V": values,
         "sigma": sigma,
         "metadata": {
-            **build_results_metadata(params, run_name="switching_policy"),
+            **build_results_metadata(
+                params,
+                run_name=infer_run_name_from_pickle_path(pickle_path),
+                model_scenario="switching-policy",
+            ),
             "parameter_snapshot": asdict(params),
         },
     }

@@ -39,10 +39,18 @@ class PlotJob:
 
 
 @dataclass(frozen=True)
+class PaperFigureJob:
+    grid_size: int
+    output_dir: str | None = None
+    switching_policy_dir: str | None = None
+
+
+@dataclass(frozen=True)
 class RunAllConfig:
     model_runs: tuple[ModelRunJob, ...]
     utility_jobs: tuple[UtilityJob, ...]
     plot_jobs: tuple[PlotJob, ...]
+    paper_figure_jobs: tuple[PaperFigureJob, ...]
 
 
 def _require_mapping(value: Any, context: str) -> dict[str, Any]:
@@ -55,6 +63,12 @@ def _require_list(value: Any, context: str) -> list[Any]:
     if not isinstance(value, list):
         raise ValueError(f"{context} must be a list.")
     return value
+
+
+def _optional_list(value: Any, context: str) -> list[Any]:
+    if value is None:
+        return []
+    return _require_list(value, context)
 
 
 def _require_string(value: Any, context: str) -> str:
@@ -120,6 +134,24 @@ def _parse_plot_job(job_data: Any, index: int) -> PlotJob:
     )
 
 
+def _parse_paper_figure_job(job_data: Any, index: int) -> PaperFigureJob:
+    job = _require_mapping(job_data, f"paper_figure_jobs[{index}]")
+    return PaperFigureJob(
+        grid_size=_require_grid_size(
+            job.get("grid_size"),
+            f"paper_figure_jobs[{index}].grid_size",
+        ),
+        output_dir=_optional_string(
+            job.get("output_dir"),
+            f"paper_figure_jobs[{index}].output_dir",
+        ),
+        switching_policy_dir=_optional_string(
+            job.get("switching_policy_dir"),
+            f"paper_figure_jobs[{index}].switching_policy_dir",
+        ),
+    )
+
+
 def _validate_uniqueness(config: RunAllConfig) -> None:
     seen_model_runs: set[tuple[str, int]] = set()
     for job in config.model_runs:
@@ -150,6 +182,15 @@ def _validate_uniqueness(config: RunAllConfig) -> None:
             )
         seen_plot_jobs.add(key)
 
+    seen_paper_figure_jobs: set[tuple[int, str | None, str | None]] = set()
+    for job in config.paper_figure_jobs:
+        key = (job.grid_size, job.output_dir, job.switching_policy_dir)
+        if key in seen_paper_figure_jobs:
+            raise ValueError(
+                f"Duplicate paper figure job at {job.grid_size}x{job.grid_size}."
+            )
+        seen_paper_figure_jobs.add(key)
+
 
 def load_run_all_config(config_path: str = DEFAULT_RUN_ALL_CONFIG_PATH) -> RunAllConfig:
     with open(config_path, "r", encoding="utf-8") as handle:
@@ -168,11 +209,18 @@ def load_run_all_config(config_path: str = DEFAULT_RUN_ALL_CONFIG_PATH) -> RunAl
         _parse_plot_job(job, index)
         for index, job in enumerate(_require_list(data.get("plot_jobs"), "plot_jobs"))
     )
+    paper_figure_jobs = tuple(
+        _parse_paper_figure_job(job, index)
+        for index, job in enumerate(
+            _optional_list(data.get("paper_figure_jobs"), "paper_figure_jobs")
+        )
+    )
 
     config = RunAllConfig(
         model_runs=model_runs,
         utility_jobs=utility_jobs,
         plot_jobs=plot_jobs,
+        paper_figure_jobs=paper_figure_jobs,
     )
     _validate_uniqueness(config)
     return config
@@ -194,6 +242,20 @@ def describe_run_all_config(config: RunAllConfig) -> str:
             output_suffix = f" -> {job.output_dir}" if job.output_dir else ""
             lines.append(
                 f"    - {job.scenario_set} @ {job.grid_size}x{job.grid_size}{output_suffix}"
+            )
+
+    if config.paper_figure_jobs:
+        lines.append("  Paper figure jobs:")
+        for job in config.paper_figure_jobs:
+            output_suffix = f" -> {job.output_dir}" if job.output_dir else ""
+            source_suffix = (
+                f" (switching_policy_dir={job.switching_policy_dir})"
+                if job.switching_policy_dir
+                else ""
+            )
+            lines.append(
+                f"    - paper_bundle @ {job.grid_size}x{job.grid_size}"
+                f"{output_suffix}{source_suffix}"
             )
 
     if config.plot_jobs:

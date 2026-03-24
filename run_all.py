@@ -8,14 +8,22 @@ import argparse
 import os
 from argparse import Namespace
 
+from build_paper_figures import (
+    build_paper_figure_bundle,
+    load_switching_policy_results,
+    paper_figure_paths,
+    resolve_switching_policy_dir,
+)
 from grid_config import model_results_path
 from harvest_timing_model import ModelParameters
 from harvest_timing_model import main as run_model
 from plot_results import main as plot_results
+from plot_utility_histograms import load_utility_scenario_results
 from plot_utility_histograms import main as plot_utility_histograms
 from run_all_config import (
     DEFAULT_RUN_ALL_CONFIG_PATH,
     ModelRunJob,
+    PaperFigureJob,
     PlotJob,
     RunAllConfig,
     UtilityJob,
@@ -80,6 +88,7 @@ def run_model_job(job: ModelRunJob) -> None:
     args = Namespace(
         temp_dir=job.run_name,
         grid_size=job.grid_size,
+        model_scenario=job.scenario,
         sanity_checks=False,
     )
     run_model(args=args, params=params)
@@ -88,7 +97,7 @@ def run_model_job(job: ModelRunJob) -> None:
 def run_utility_job(job: UtilityJob, produced_results: set[tuple[str, int]]) -> None:
     for scenario in get_utility_scenarios(job.scenario_set):
         _ensure_result_available(
-            scenario["run_name"],
+            scenario["default_run_name"],
             job.grid_size,
             produced_results,
             consumer=f"utility job '{job.scenario_set}'",
@@ -133,6 +142,61 @@ def run_plot_job(job: PlotJob, produced_results: set[tuple[str, int]]) -> None:
     raise ValueError(f"Unsupported plot job kind: {job.kind}")
 
 
+def resolve_paper_switching_policy_dir(
+    job: PaperFigureJob,
+    config: RunAllConfig,
+) -> str:
+    if job.switching_policy_dir is not None:
+        return job.switching_policy_dir
+
+    matching_runs = tuple(
+        model_run
+        for model_run in config.model_runs
+        if model_run.scenario == "switching-policy" and model_run.grid_size == job.grid_size
+    )
+    if len(matching_runs) == 1:
+        return os.path.dirname(model_results_path(matching_runs[0].run_name, job.grid_size))
+    if len(matching_runs) > 1:
+        run_names = ", ".join(model_run.run_name for model_run in matching_runs)
+        raise ValueError(
+            "paper figure job has multiple switching-policy model runs at "
+            f"{job.grid_size}x{job.grid_size} ({run_names}). "
+            "Set paper_figure_jobs[].switching_policy_dir explicitly."
+        )
+
+    return resolve_switching_policy_dir(None, job.grid_size)
+
+
+def run_paper_figure_job(job: PaperFigureJob, config: RunAllConfig) -> None:
+    paper_output_dir = job.output_dir or os.path.join("outputs", "paper_figures")
+    paths = paper_figure_paths(paper_output_dir, job.grid_size)
+    switch_dir = resolve_paper_switching_policy_dir(job, config)
+    switching_policy_pickle, _ = load_switching_policy_results(
+        switch_dir,
+        job.grid_size,
+    )
+
+    _print_job_header(
+        f"REFRESHING PAPER UTILITY CACHES: paper ({job.grid_size}x{job.grid_size})"
+    )
+    load_utility_scenario_results(
+        scenario_set="paper",
+        grid_size=job.grid_size,
+        pickle_path=switching_policy_pickle,
+        cache_dir=paths["utility_cache"],
+        rerun=True,
+    )
+
+    _print_job_header(
+        f"RUNNING PAPER FIGURE JOB: paper_bundle ({job.grid_size}x{job.grid_size})"
+    )
+    build_paper_figure_bundle(
+        output_dir=paper_output_dir,
+        grid_size=job.grid_size,
+        switching_policy_dir=switch_dir,
+    )
+
+
 def execute_workflow(config: RunAllConfig) -> None:
     produced_results: set[tuple[str, int]] = set()
 
@@ -143,8 +207,12 @@ def execute_workflow(config: RunAllConfig) -> None:
     for job in config.utility_jobs:
         run_utility_job(job, produced_results)
 
+    for job in config.paper_figure_jobs:
+        run_paper_figure_job(job, config)
+
     for job in config.plot_jobs:
         run_plot_job(job, produced_results)
+
 
 
 def main(args: argparse.Namespace | None = None) -> None:
