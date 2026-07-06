@@ -98,7 +98,7 @@ MAIN_PHASE_DIAGRAM_ANNOTATIONS = [
             "ha": "center",
             "va": "center",
             "fontsize": 7.1,
-            "line_from": (0.76, 0.50),
+            "line_from": (1.00, 0.50),
             "line_to": (0.90, 0.52),
         },
     ],
